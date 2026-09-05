@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>B站礼物进度追踪</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<canvas id="fxCanvas"></canvas>
+
+<div id="celebrateBox" class="celebrate-box hidden">
+  <div class="celebrate-title">目标达成！</div>
+  <div class="celebrate-sub" id="celebrateSub"></div>
+</div>
+
+<div id="settingsPanel" class="panel hidden">
+  <div class="panel-header">
+    <span>设置</span>
+    <button id="closeSettings" class="btn btn-mini" type="button">关闭</button>
+  </div>
+
+  <label class="field">直播间房间号
+    <input id="roomIdInput" type="text" inputmode="numeric" placeholder="例如 21452505">
+  </label>
+
+  <div class="status-line">
+    连接状态：<span id="connText" class="conn-text">未连接</span>
+  </div>
+
+  <label class="field">目标金额（元）
+    <input id="targetInput" type="number" min="1" step="1" placeholder="例如 5000">
+  </label>
+
+  <div class="field">
+    <div class="field-label">B站账号登录（可选，显示完整用户名）</div>
+    <div class="login-status" id="loginStatus">未登录</div>
+    <button id="loginBtn" class="btn" type="button">扫码登录</button>
+    <div id="qrArea" class="qr-area hidden">
+      <img id="qrImg" alt="二维码">
+      <div class="qr-tip" id="qrTip">请用 B 站 APP 扫码并确认登录</div>
+    </div>
+    <button id="logoutBtn" class="btn hidden" type="button">退出登录</button>
+  </div>
+
+  <label class="check"><input id="debugInput" type="checkbox" checked> 调试模式（显示全部原始消息）</label>
+
+  <label class="check"><input id="chatToggleInput" type="checkbox" checked> 显示弹幕面板</label>
+
+  <div class="btn-row">
+    <button id="saveBtn" class="btn btn-primary" type="button">保存并连接</button>
+    <button id="resetBtn" class="btn" type="button">重置进度</button>
+  </div>
+
+  <div class="test-row">
+    <span>模拟测试：</span>
+    <button class="btn" type="button" data-test="10">+10元</button>
+    <button class="btn" type="button" data-test="100">+100元</button>
+    <button class="btn" type="button" data-test="goal">直达目标</button>
+  </div>
+
+  <div class="hint">配置完成后在 OBS 添加浏览器源指向本页地址（如 http://localhost:3000 ），去掉页面背景即可叠加。达成目标会自动播放特效与音效。</div>
+</div>
+
+<div id="app">
+  <div class="top-bar">
+    <button id="settingsBtn" class="gear" type="button">设置</button>
+    <div class="conn">
+      <span class="dot" id="connDot"></span>
+      <span id="connTextTop">未连接</span>
+    </div>
+  </div>
+  <div class="bar-shell" id="barShell">
+    <div class="bar-fill" id="barFill">
+      <div class="bar-shine"></div>
+    </div>
+    <div class="bar-label">
+      <div class="label-line1">
+        <span class="label-amount" id="labelAmount">¥ 0.00</span>
+        <span class="label-target" id="labelTarget">目标 ¥ 5,000.00</span>
+        <span class="label-pct" id="labelPct">0.0%</span>
+      </div>
+      <div class="label-line2" id="labelGift">等待礼物...</div>
+    </div>
+  </div>
+</div>
+
+<div id="debugLog" class="debug-log">
+  <div class="debug-log-title">消息日志</div>
+  <div class="debug-log-body" id="debugLogBody"></div>
+</div>
+
+<div id="chatPanel" class="chat-panel">
+  <div class="chat-body" id="chatBody"></div>
+</div>
+
+<script src="js/lib/qrcode.js"></script>
+<script src="js/protocol.js"></script>
+<script src="js/effects.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'">
+<title>Danmu Hime Control</title>
+<link rel="stylesheet" href="desktop.css">
+</head>
+<body>
+<div class="window-surface">
+  <header class="window-chrome">
+    <div class="drag-region">
+      <span class="brand-mark"></span>
+      <span class="brand-name">DANMU HIME</span>
+      <span class="window-kind">CONTROL</span>
+    </div>
+    <div class="window-actions">
+      <button id="minimizeButton" type="button" aria-label="最小化">—</button>
+      <button id="closeButton" class="close" type="button" aria-label="关闭">×</button>
+    </div>
+  </header>
+
+  <main class="control-shell">
+    <section class="hero-row">
+      <div>
+        <span class="eyebrow">LIVE OVERLAY</span>
+        <h1>弹幕输出控制台</h1>
+        <p>设置窗口不会出现在 OBS 输出中。</p>
+      </div>
+      <div class="status-card" id="statusCard" data-status="disconnected">
+        <i></i>
+        <span id="statusText">未连接</span>
+      </div>
+    </section>
+
+    <section class="control-section room-section">
+      <div class="section-label">
+        <span>直播间</span>
+        <small id="roomHint">连接后自动保存</small>
+      </div>
+      <div class="connect-line">
+        <input id="roomInput" inputmode="numeric" autocomplete="off" placeholder="输入 B 站房间号">
+        <button id="connectButton" class="primary" type="button">连接</button>
+      </div>
+    </section>
+
+    <section class="control-section account-section">
+      <div class="account-copy">
+        <span class="account-kicker">BILIBILI ACCOUNT</span>
+        <div class="account-state">
+          <i id="loginDot"></i>
+          <span id="loginStatus">正在检查登录状态</span>
+        </div>
+        <small id="loginDetail">登录后弹幕用户名完整，连接认证也更稳定。</small>
+      </div>
+      <button id="loginButton" class="account-button" type="button">扫码登录</button>
+      <button id="logoutButton" class="account-button hidden" type="button">退出登录</button>
+    </section>
+
+    <section class="control-section obs-section">
+      <div class="section-label">
+        <span>OBS 镜像输出</span>
+        <small id="obsMirrorSizeText">当前镜像尺寸跟随桌面预览</small>
+      </div>
+      <div class="obs-url-line">
+        <input id="obsUrlInput" type="text" readonly aria-label="OBS 浏览器源地址">
+        <button id="copyObsUrlButton" type="button">复制地址</button>
+      </div>
+      <small class="obs-help">OBS 页面会自动按比例显示桌面预览；浏览器源填相同宽高可获得 1:1 清晰度。</small>
+    </section>
+
+    <section class="control-section">
+      <div class="section-label">
+        <span>弹幕皮肤</span>
+        <small>实时同步到透明输出窗口</small>
+      </div>
+      <div class="theme-grid" role="group" aria-label="弹幕皮肤">
+        <div class="theme-option" data-theme-option="glass">
+          <button class="theme-choice" type="button" data-theme-choice="glass">
+            <i class="theme-swatch glass"></i><span><b>轻雾玻璃</b><small>冷调、克制、局部磨砂</small></span>
+          </button>
+          <button class="theme-settings-button" type="button" data-theme-settings="glass" aria-label="设置轻雾玻璃"><i aria-hidden="true"></i></button>
+        </div>
+        <div class="theme-option" data-theme-option="pixel">
+          <button class="theme-choice" type="button" data-theme-choice="pixel">
+            <i class="theme-swatch pixel"></i><span><b>单色点阵</b><small>仅显示点亮的琥珀像素</small></span>
+          </button>
+          <button class="theme-settings-button" type="button" data-theme-settings="pixel" aria-label="设置单色点阵"><i aria-hidden="true"></i></button>
+        </div>
+        <div class="theme-option" data-theme-option="tui">
+          <button class="theme-choice" type="button" data-theme-choice="tui">
+            <i class="theme-swatch tui"></i><span><b>OpenCode TUI</b><small>纯黑终端、紧凑信息层级</small></span>
+          </button>
+          <button class="theme-settings-button" type="button" data-theme-settings="tui" aria-label="设置 OpenCode TUI"><i aria-hidden="true"></i></button>
+        </div>
+        <div class="theme-option" data-theme-option="risograph">
+          <button class="theme-choice" type="button" data-theme-choice="risograph">
+            <i class="theme-swatch risograph"></i><span><b>Risograph</b><small>双色套印、网点与缺墨</small></span>
+          </button>
+          <button class="theme-settings-button" type="button" data-theme-settings="risograph" aria-label="设置 Risograph"><i aria-hidden="true"></i></button>
+        </div>
+      </div>
+    </section>
+
+    <section class="control-section compact-section">
+      <div class="dimension-field">
+        <div class="dimension-heading">
+          <span>主播预览窗口尺寸</span>
+          <small>唯一尺寸基准，可直接拖动窗口边缘</small>
+        </div>
+        <div class="dimension-line">
+          <label><span>W</span><input id="overlayWidthInput" type="number" min="240" max="7680" step="1" value="450" aria-label="输出窗口宽度"></label>
+          <i>×</i>
+          <label><span>H</span><input id="overlayHeightInput" type="number" min="160" max="2160" step="1" value="650" aria-label="输出窗口高度"></label>
+          <button id="applyOverlaySizeButton" type="button">应用</button>
+        </div>
+      </div>
+      <label class="toggle-line">
+        <span><b>锁定输出窗口尺寸</b><small>锁定后仍可拖动位置，避免误拉伸</small></span>
+        <input id="overlaySizeLockedInput" type="checkbox">
+      </label>
+      <label class="toggle-line">
+        <span><b>显示主播桌面预览</b><small>关闭后 OBS 输出仍继续工作</small></span>
+        <input id="previewEnabledInput" type="checkbox" checked>
+      </label>
+      <label class="toggle-line">
+        <span><b>输出窗口始终置顶</b><small>保持在游戏及普通窗口上方</small></span>
+        <input id="alwaysOnTopInput" type="checkbox" checked>
+      </label>
+    </section>
+
+    <section class="output-actions">
+      <button id="clickThroughButton" class="action-button" type="button">
+        <span>鼠标穿透</span><small>Ctrl + Shift + F10 随时解锁</small>
+      </button>
+      <button id="showOverlayButton" class="action-button" type="button">
+        <span>定位输出窗口</span><small>解除穿透并聚焦透明窗口</small>
+      </button>
+      <button id="resetOverlayButton" class="quiet-button" type="button">重置输出窗口位置</button>
+      <button id="testMessageButton" class="quiet-button" type="button">发送四套预览内容</button>
+    </section>
+  </main>
+</div>
+
+  <div id="qrDialog" class="qr-dialog hidden" role="dialog" aria-modal="true" aria-labelledby="qrTitle">
+    <button id="qrBackdrop" class="qr-backdrop" type="button" aria-label="关闭登录二维码"></button>
+    <section class="qr-sheet">
+      <div class="qr-heading">
+        <div>
+          <span>SECURE LOGIN</span>
+          <h2 id="qrTitle">B 站扫码登录</h2>
+        </div>
+        <button id="qrCloseButton" type="button" aria-label="关闭">×</button>
+      </div>
+      <div class="qr-frame"><img id="qrImage" alt="B 站登录二维码"></div>
+      <p id="qrTip">请使用 B 站 App 扫码并在手机上确认</p>
+      <button id="qrRefreshButton" class="qr-refresh" type="button">刷新二维码</button>
+    </section>
+  </div>
+
+  <div id="themeDialog" class="theme-dialog hidden" role="dialog" aria-modal="true" aria-labelledby="themeDialogTitle">
+    <button id="themeBackdrop" class="theme-backdrop" type="button" aria-label="关闭皮肤设置"></button>
+    <section class="theme-sheet">
+      <div class="theme-sheet-heading">
+        <div><span>THEME BASELINE</span><h2 id="themeDialogTitle">皮肤设置</h2></div>
+        <button id="themeCloseButton" type="button" aria-label="关闭">×</button>
+      </div>
+      <p class="theme-help">当前输出窗口尺寸会成为新的响应式基准。</p>
+      <label class="font-family-field"><span>字体名称</span><input id="fontFamilyInput" list="fontFamilyOptions" autocomplete="off" placeholder="输入本机已安装字体"></label>
+      <datalist id="fontFamilyOptions">
+        <option value="Segoe UI Variable Text"></option><option value="Microsoft YaHei UI"></option>
+        <option value="Cascadia Mono"></option><option value="KaiTi"></option><option value="SimHei"></option>
+        <option value="GNU Unifont 16 Bitmap"></option>
+      </datalist>
+      <div class="theme-control-list">
+        <label><span>整体比例 <output id="themeScaleValue">100%</output></span><input id="themeScaleInput" type="range" min="60" max="140" step="1"></label>
+        <label><span>弹幕垂直间距 <output id="messageGapValue">10px</output></span><input id="messageGapInput" type="range" min="0" max="20" step="1"></label>
+        <label><span>弹幕正文字号 <output id="messageFontValue">34px</output></span><input id="messageFontInput" type="range" min="16" max="48" step="1"></label>
+        <label><span>用户名字号 <output id="nameFontValue">20px</output></span><input id="nameFontInput" type="range" min="10" max="30" step="1"></label>
+        <label><span>身份与礼物价值 <output id="metaFontValue">14px</output></span><input id="metaFontInput" type="range" min="8" max="24" step="1"></label>
+        <label><span>时间字号 <output id="timeFontValue">12px</output></span><input id="timeFontInput" type="range" min="9" max="22" step="1"></label>
+        <label class="surface-opacity-control"><span>承载面不透明度 <output id="themeOpacityValue">68%</output></span><small>0% 仅保留弹幕 · 100% 显示完整皮肤背景</small><input id="themeOpacityInput" type="range" min="0" max="100" step="1"></label>
+      </div>
+      <label class="theme-avatar-toggle">
+        <span><b>显示用户头像</b><small>每套皮肤独立保存；关闭后保持极简布局</small></span>
+        <input id="themeAvatarInput" type="checkbox">
+      </label>
+      <div class="theme-color-line">
+        <label><span>正文颜色</span><input id="bodyColorInput" type="color"></label>
+        <label><span>礼物颜色</span><input id="giftColorInput" type="color"></label>
+        <label><span>时间颜色</span><input id="timeColorInput" type="color"></label>
+        <label><span>普通用户</span><input id="viewerColorInput" type="color"></label>
+        <label><span>主播</span><input id="hostColorInput" type="color"></label>
+        <label><span>房管</span><input id="managerColorInput" type="color"></label>
+        <label><span>总督</span><input id="governorColorInput" type="color"></label>
+        <label><span>提督</span><input id="admiralColorInput" type="color"></label>
+        <label><span>舰长</span><input id="captainColorInput" type="color"></label>
+      </div>
+      <div class="theme-sheet-actions">
+        <button id="resetThemeButton" type="button">恢复这套默认值</button>
+        <button id="saveThemeButton" class="primary" type="button">完成</button>
+      </div>
+    </section>
+  </div>
+
+  <script src="../js/lib/qrcode.js"></script>
+  <script src="renderer.js"></script>
+</body>
+</html>

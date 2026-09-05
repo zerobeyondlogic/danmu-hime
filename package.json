@@ -1,0 +1,49 @@
+{
+  "name": "danmu-hime",
+  "version": "0.2.1",
+  "private": true,
+  "description": "A transparent Bilibili live chat overlay for streamers",
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zerobeyondlogic/danmu-hime.git"
+  },
+  "main": "desktop/main.js",
+  "scripts": {
+    "desktop": "electron .",
+    "test": "node test/protocol.test.js && node test/relay.test.js && node test/emotes.test.js && node test/avatars.test.js && node test/pixel-font.test.js",
+    "check": "node --check server.js && node --check relay.js && node --check js/protocol.js && node --check js/emotes.js && node --check js/avatars.js && node --check js/pixel-font.js && node --check js/app.js && node --check js/effects.js && node --check desktop/main.js && node --check desktop/preload.js && node --check desktop/renderer.js && node --check desktop/overlay.js && node --check scripts/build-pixel-font.js",
+    "dist": "electron-builder --win portable"
+  },
+  "devDependencies": {
+    "electron": "43.1.0",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "com.danmuhime.overlay",
+    "productName": "Danmu Hime",
+    "asar": true,
+    "files": [
+      "desktop/**/*",
+      "css/**/*",
+      "js/**/*",
+      "index.html",
+      "server.js",
+      "relay.js",
+      "README.md",
+      "!data/cookies.json",
+      "!test/**/*"
+    ],
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        "portable"
+      ],
+      "artifactName": "Danmu-Hime-${version}-portable.${ext}"
+    }
+  }
+}

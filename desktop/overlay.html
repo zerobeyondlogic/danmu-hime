@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: https://*.hdslb.com https://*.bilibili.com; style-src 'self'; script-src 'self'; connect-src 'self' ws:">
+<title>Danmu Hime Output</title>
+<link rel="stylesheet" href="overlay.css">
+</head>
+<body data-theme="glass">
+  <main class="overlay-stage" id="overlayStage">
+    <section class="message-stack" id="messageStack" aria-live="polite">
+      <div class="empty-state" id="emptyState">
+        <span class="empty-state-title">等待弹幕中</span>
+        <span class="empty-state-hint">拖动此区域定位输出窗口</span>
+      </div>
+      <div class="pinned-sc-stack" id="pinnedScStack" aria-label="置顶付费留言"></div>
+      <div class="message-list" id="messageList"></div>
+    </section>
+  </main>
+  <div class="unlock-toast" id="unlockToast">输出窗口已解锁 · Ctrl + Shift + F10 切换穿透</div>
+  <div class="resize-handle edge-n" data-resize-edge="n" aria-hidden="true"></div>
+  <div class="resize-handle edge-e" data-resize-edge="e" aria-hidden="true"></div>
+  <div class="resize-handle edge-s" data-resize-edge="s" aria-hidden="true"></div>
+  <div class="resize-handle edge-w" data-resize-edge="w" aria-hidden="true"></div>
+  <div class="resize-handle edge-ne" data-resize-edge="ne" aria-hidden="true"></div>
+  <div class="resize-handle edge-se" data-resize-edge="se" aria-hidden="true"></div>
+  <div class="resize-handle edge-sw" data-resize-edge="sw" aria-hidden="true"></div>
+  <div class="resize-handle edge-nw" data-resize-edge="nw" aria-hidden="true"></div>
+  <script src="../js/protocol.js"></script>
+  <script src="../js/emotes.js"></script>
+  <script src="../js/avatars.js"></script>
+  <script src="../js/pixel-font.js"></script>
+  <script src="overlay.js"></script>
+</body>
+</html>
