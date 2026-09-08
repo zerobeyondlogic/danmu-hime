@@ -417,6 +417,10 @@ body.is-click-through .resize-handle { display: none; }
 body.size-locked .resize-handle { display: none !important; }
 
 /* Light fog glass */
+body[data-theme="glass"] .message-avatar {
+  border: 0;
+}
+
 body[data-theme="glass"] .message-row {
   background: transparent;
   box-shadow: none;
@@ -517,7 +521,7 @@ body[data-theme="pixel"] .pixel-source {
   text-shadow: none !important;
 }
 
-body[data-theme="pixel"].pixel-font-ready .pixel-source {
+body[data-theme="pixel"].pixel-font-ready .pixel-rendered .pixel-source {
   color: transparent !important;
 }
 

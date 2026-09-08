@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { createLiveScene } = require('./live-scene.js');
 const {
   app,
   BrowserWindow,
@@ -9,7 +10,8 @@ const {
   globalShortcut,
   ipcMain,
   Menu,
-  screen
+  screen,
+  Tray
 } = require('electron');
 
 const CONTROL_BOUNDS = { width: 468, height: 760 };
@@ -20,13 +22,20 @@ const OBS_PORT = 38426;
 const DIMENSION_MODEL_VERSION = 7;
 const UNLOCK_SHORTCUT = 'CommandOrControl+Shift+F10';
 const MAX_SCENE_MESSAGES = 48;
+const SCENE_PUBLISH_INTERVAL = 16;
 const OVERLAY_SNAP_DISTANCE = 12;
 const OVERLAY_SNAP_RELEASE_DISTANCE = 32;
 const APP_ICON = path.join(__dirname, 'assets', 'icon.png');
 
 let controlWindow = null;
+let appTray = null;
+let controlCloseTask = null;
+let controlClosePromptFinish = null;
+let controlQuitRequested = false;
+let controlCloseSequence = 0;
 let overlayWindow = null;
 let embedded = null;
+let liveScene = null;
 let embeddedPort = OBS_PORT;
 let clickThrough = false;
 let overlayStatus = 'disconnected';
@@ -47,6 +56,8 @@ let overlaySnapState = { horizontal: null, vertical: null };
 let sceneMessages = [];
 let sceneRevision = 0;
 let nextSceneMessageId = 1;
+let scenePublishTimer = null;
+let previewResizeRequest = 0;
 
 function cleanSceneString(value, maxLength) {
   return String(value === undefined || value === null ? '' : value).slice(0, maxLength);
@@ -96,10 +107,20 @@ function sceneSnapshot() {
   };
 }
 
-function publishScene() {
+function flushScene() {
+  if (scenePublishTimer !== null) clearTimeout(scenePublishTimer);
+  scenePublishTimer = null;
   if (embedded && typeof embedded.publishDesktopOutput === 'function') {
-    embedded.publishDesktopOutput('scene', sceneSnapshot());
+    // Defer copying the scene until the server has an output subscriber.
+    embedded.publishDesktopOutput('scene', sceneSnapshot);
   }
+}
+
+function publishScene() {
+  if (scenePublishTimer !== null) return;
+  // A burst still accepts and numbers every message, but OBS only needs the
+  // latest scene once per frame instead of every intermediate full snapshot.
+  scenePublishTimer = setTimeout(flushScene, SCENE_PUBLISH_INTERVAL);
 }
 
 function addSceneMessage(value) {
@@ -132,8 +153,29 @@ function dismissSceneMessage(id) {
 function clearScene() {
   sceneMessages = [];
   sceneRevision += 1;
-  sendTo(overlayWindow, 'desktop:scene-cleared');
-  publishScene();
+  sendTo(overlayWindow, 'desktop:scene-cleared', sceneRevision);
+  // Clear immediately and cancel any pending snapshot from the old room.
+  flushScene();
+}
+
+function addPreviewMessages() {
+  const samples = [
+    { type: 'chat', uname: '神绮爱', role: 'host', text: '今晚的声音刚刚好' },
+    { type: 'chat', uname: '小透明', role: 'manager', text: '连接状态正常，弹幕已同步' },
+    { type: 'chat', uname: '赤焰之心', role: 'governor', medal: '陪伴 18', text: '继续加油，期待更多精彩！' },
+    { type: 'chat', uname: '紫电青霜', role: 'admiral', medal: '陪伴 12', text: '一起陪伴主播成长！' },
+    { type: 'chat', uname: '晨曦之光', role: 'captain', medal: '陪伴 6', text: '舰长来啦，支持神绮爱！' },
+    { type: 'chat', uname: '星河入梦', role: 'viewer', text: '这套界面看着很舒服' },
+    { type: 'gift', kind: 'gift', uname: '云水之间', role: 'viewer', text: '赠送  小花花 × 10', valueYuan: 30 },
+    { type: 'sc', kind: 'sc', uname: '晚风与你', role: 'captain', text: '求配置和键位分享～', valueYuan: 50 }
+  ];
+  const gaps = [451, 385, 12000, 24000, 24000, 36000, 50000, 70000];
+  const now = new Date();
+  const time = [now.getHours(), now.getMinutes(), now.getSeconds()].map((part) => String(part).padStart(2, '0')).join(':');
+  samples.forEach((message, index) => addSceneMessage(Object.assign({}, message, {
+    at: now.getTime(), time, gapMs: gaps[index]
+  })));
+  syncPreviewWindow();
 }
 
 function loadState() {
@@ -321,20 +363,23 @@ function waitForPreviewViewport(afterRevision, timeoutMs) {
     const finish = (value) => {
       if (settled) return;
       settled = true;
+      clearTimeout(timer);
+      previewViewportWaiters = previewViewportWaiters.filter((waiter) => waiter !== finish);
       resolve(value);
     };
     previewViewportWaiters.push(finish);
-    setTimeout(() => finish(null), timeoutMs || 300);
+    const timer = setTimeout(() => finish(null), timeoutMs || 300);
   });
 }
 
-async function readRendererViewport() {
-  if (!overlayWindow || overlayWindow.isDestroyed() || overlayWindow.webContents.isDestroyed()) return null;
+async function readRendererViewport(window = overlayWindow) {
+  if (!window || window !== overlayWindow || window.isDestroyed() || window.webContents.isDestroyed()) return null;
   try {
-    const value = await overlayWindow.webContents.executeJavaScript(
+    const value = await window.webContents.executeJavaScript(
       '({ width: window.innerWidth, height: window.innerHeight })',
       true
     );
+    if (app.isQuitting || window !== overlayWindow || window.isDestroyed()) return null;
     return acceptPreviewViewport(value);
   } catch (e) {
     return null;
@@ -384,16 +429,76 @@ function setReportedStatus(status) {
   if (next === 'reconnect' && overlayStatus !== 'reconnect') clearScene();
   overlayStatus = next;
   overlayHasConnected = next === 'open';
-  if (overlayStatus === 'open' && (appState.settings || {}).previewEnabled !== false && overlayWindow && !overlayWindow.isDestroyed() && !overlayWindow.isVisible()) {
-    overlayWindow.showInactive();
-    setClickThrough(clickThrough);
-  }
+  if (overlayHasConnected) syncPreviewWindow();
   sendTo(controlWindow, 'desktop:overlay-status-changed', overlayStatus);
 }
 
 function beginRoomConnection() {
   overlayHasConnected = false;
-  setReportedStatus('waiting-obs');
+  setReportedStatus('init');
+}
+
+function connectDesktopRoom(roomId) {
+  const normalized = String(roomId || '').trim();
+  if (!/^\d+$/.test(normalized) || !liveScene) return false;
+  roomConnectionRequested = true;
+  appState.settings = Object.assign({}, appState.settings, { roomId: normalized });
+  saveStateSoon();
+  clearScene();
+  beginRoomConnection();
+  syncPreviewWindow();
+  sendTo(overlayWindow, 'desktop:settings-changed', withPreviewCanvas(appState.settings, normalized));
+  publishOutputSettings();
+  liveScene.connect(normalized).catch((error) => {
+    console.error('[desktop] 连接直播间失败:', error.message);
+    if (!app.isQuitting) setReportedStatus('api-fail');
+  });
+  return true;
+}
+
+function clearPreviewRuntime() {
+  previewResizeRequest += 1;
+  const waiters = previewViewportWaiters;
+  previewViewportWaiters = [];
+  waiters.forEach((finish) => finish(null));
+  previewViewport = null;
+  previewViewportRevision += 1;
+  applyingPreviewSize = false;
+  manualPreviewResizePending = false;
+  suppressRequestedViewportUntil = 0;
+  overlaySnapState = { horizontal: null, vertical: null };
+}
+
+function releaseOverlayWindow() {
+  const window = overlayWindow;
+  if (!window || window.isDestroyed()) return;
+  rememberBounds(window, 'overlayBounds');
+  overlayWindow = null;
+  clearPreviewRuntime();
+  window.destroy();
+  saveStateSoon();
+}
+
+function syncPreviewWindow() {
+  if ((appState.settings || {}).previewEnabled === false) {
+    releaseOverlayWindow();
+    return null;
+  }
+  if (!roomConnectionRequested && !sceneMessages.length) return null;
+  const window = createOverlayWindow(embeddedPort);
+  if ((overlayHasConnected || sceneMessages.length) && window && !window.webContents.isLoadingMainFrame()) {
+    window.showInactive();
+    setClickThrough(clickThrough);
+  }
+  return window;
+}
+
+function setPreviewEnabled(enabled) {
+  appState.settings = Object.assign({}, appState.settings, { previewEnabled: !!enabled });
+  saveStateSoon();
+  syncPreviewWindow();
+  sendTo(controlWindow, 'desktop:preview-enabled-changed', !!enabled);
+  publishOutputSettings();
 }
 
 function clampBounds(saved, defaults, minWidth, minHeight) {
@@ -478,6 +583,7 @@ function secureWindow(window, port) {
 }
 
 function createOverlayWindow(port) {
+  if (app.isQuitting || (appState.settings || {}).previewEnabled === false) return null;
   if (overlayWindow && !overlayWindow.isDestroyed()) return overlayWindow;
   const bounds = clampBounds(appState.overlayBounds, OVERLAY_BOUNDS, MIN_OVERLAY_BOUNDS.width, MIN_OVERLAY_BOUNDS.height);
   const requested = getRequestedPreviewSize();
@@ -513,28 +619,208 @@ function createOverlayWindow(port) {
     }
   });
 
-  secureWindow(overlayWindow, port);
+  const window = overlayWindow;
+  secureWindow(window, port);
   setOverlayAlwaysOnTop((appState.settings || {}).alwaysOnTop !== false);
   setOverlayResizableForSettings();
-  overlayWindow.once('ready-to-show', () => {
+  window.once('ready-to-show', () => {
+    if (window !== overlayWindow || window.isDestroyed() || app.isQuitting) return;
     setClickThrough(clickThrough);
-    setOverlayContentSize(requested.width, requested.height);
+    // A disabled preview may have had its canonical dimensions changed while
+    // this page was loading. Always use the latest saved size.
+    const target = getRequestedPreviewSize();
+    setOverlayContentSize(target.width, target.height).catch((error) => console.warn('[desktop] 更新预览尺寸失败:', error.message));
+    if (overlayHasConnected || sceneMessages.length) window.showInactive();
   });
-  overlayWindow.on('resize', () => {
-    rememberBounds(overlayWindow, 'overlayBounds');
+  window.on('resize', () => {
+    rememberBounds(window, 'overlayBounds');
   });
-  overlayWindow.on('move', () => {
+  window.on('move', () => {
+    if (window !== overlayWindow) return;
     snapOverlayToDisplayEdges();
-    rememberBounds(overlayWindow, 'overlayBounds');
+    rememberBounds(window, 'overlayBounds');
   });
-  overlayWindow.on('closed', () => {
-    overlayWindow = null;
+  window.on('close', (event) => {
+    if (app.isQuitting) return;
+    event.preventDefault();
+    setPreviewEnabled(false);
   });
-  overlayWindow.loadURL('http://127.0.0.1:' + port + '/desktop/overlay.html');
-  return overlayWindow;
+  window.on('closed', () => {
+    if (overlayWindow === window) {
+      overlayWindow = null;
+      clearPreviewRuntime();
+    }
+  });
+  window.loadURL('http://127.0.0.1:' + port + '/desktop/overlay.html');
+  return window;
+}
+
+function ensureTray() {
+  if (appTray && !appTray.isDestroyed()) return appTray;
+  const tray = new Tray(APP_ICON);
+  try {
+    tray.setToolTip('Danmu Hime · 弹幕姬');
+    tray.setContextMenu(Menu.buildFromTemplate([
+      { label: '打开控制台', click: showControlWindow },
+      { type: 'separator' },
+      { label: '退出弹幕姬', click: () => requestControlClose(controlWindow, true) }
+    ]));
+    tray.on('click', showControlWindow);
+    tray.on('double-click', showControlWindow);
+  } catch (error) {
+    tray.destroy();
+    throw error;
+  }
+  appTray = tray;
+  return appTray;
+}
+
+function showControlWindow() {
+  if (app.isQuitting || !embedded || !embedded.server.listening) return null;
+  const window = createControlWindow(embeddedPort);
+  if (!window.webContents.isLoadingMainFrame()) {
+    if (window.isMinimized()) window.restore();
+    window.show();
+    window.moveTop();
+    window.focus();
+  }
+  return window;
+}
+
+function prepareControlClose(window) {
+  if (!window || window.isDestroyed() || window.webContents.isDestroyed() || window.webContents.isLoadingMainFrame()) {
+    return Promise.resolve(true);
+  }
+  const token = ++controlCloseSequence;
+  return new Promise((resolve) => {
+    const finish = (ok) => {
+      clearTimeout(timer);
+      ipcMain.removeListener('desktop:control-close-prepared', onPrepared);
+      window.removeListener('closed', onClosed);
+      resolve(ok);
+    };
+    const onPrepared = (event, receivedToken, ok) => {
+      if (event.sender === window.webContents && receivedToken === token) finish(ok === true);
+    };
+    const onClosed = () => finish(true);
+    const timer = setTimeout(() => finish(false), 2500);
+    ipcMain.on('desktop:control-close-prepared', onPrepared);
+    window.once('closed', onClosed);
+    try {
+      window.webContents.send('desktop:prepare-control-close', token);
+    } catch (e) {
+      finish(false);
+    }
+  });
+}
+
+function askControlClose(window) {
+  const token = 'close-' + (++controlCloseSequence);
+  const contents = window.webContents;
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (response) => {
+      if (settled) return;
+      settled = true;
+      if (controlClosePromptFinish === finish) controlClosePromptFinish = null;
+      ipcMain.removeListener('desktop:control-close-choice', onChoice);
+      window.removeListener('closed', onClosed);
+      contents.removeListener('did-finish-load', showPrompt);
+      contents.removeListener('did-fail-load', onLoadFailed);
+      contents.removeListener('render-process-gone', onClosed);
+      resolve(response);
+    };
+    const onChoice = (event, receivedToken, action) => {
+      if (event.sender !== contents || receivedToken !== token) return;
+      const choices = { tray: 0, quit: 1, cancel: 2 };
+      if (Object.prototype.hasOwnProperty.call(choices, action)) finish(choices[action]);
+    };
+    const onClosed = () => finish(2);
+    const onLoadFailed = (_event, _code, _description, _url, isMainFrame) => {
+      if (isMainFrame !== false) finish(2);
+    };
+    const showPrompt = () => {
+      if (app.isQuitting || window.isDestroyed() || contents.isDestroyed()) {
+        finish(2);
+        return;
+      }
+      if (window.isMinimized()) window.restore();
+      window.show();
+      window.focus();
+      // Render inside the existing console so the choice matches its theme
+      // without creating another native dialog or renderer process.
+      try {
+        contents.send('desktop:control-close-prompt', { token });
+      } catch (e) {
+        finish(2);
+      }
+    };
+    controlClosePromptFinish = finish;
+    ipcMain.on('desktop:control-close-choice', onChoice);
+    window.once('closed', onClosed);
+    contents.once('render-process-gone', onClosed);
+    if (contents.isLoadingMainFrame()) {
+      contents.once('did-finish-load', showPrompt);
+      contents.on('did-fail-load', onLoadFailed);
+    } else {
+      showPrompt();
+    }
+  });
+}
+
+function requestControlClose(window = controlWindow, quitDirectly = false) {
+  if (app.isQuitting) return Promise.resolve();
+  if (controlCloseTask) {
+    if (quitDirectly) {
+      controlQuitRequested = true;
+      if (controlClosePromptFinish) controlClosePromptFinish(1);
+    }
+    return controlCloseTask;
+  }
+  controlQuitRequested = quitDirectly;
+  controlCloseTask = (async () => {
+    if (!window || window.isDestroyed()) {
+      if (quitDirectly) app.quit();
+      return;
+    }
+    let response = quitDirectly ? 1 : await askControlClose(window);
+    if (controlQuitRequested) response = 1;
+    if (response === 2 || app.isQuitting || window.isDestroyed()) return;
+    if (response !== 0 && response !== 1) return;
+    if (response === 0) ensureTray();
+
+    // Freeze edits while the renderer flushes its pending settings / resize work.
+    window.setEnabled(false);
+    const prepared = await prepareControlClose(window);
+    if (window.isDestroyed() || app.isQuitting) return;
+    window.setEnabled(true);
+    if (!prepared) {
+      sendTo(window, 'desktop:control-close-error', '设置尚未保存，请稍后重试。');
+      return;
+    }
+    rememberBounds(window, 'controlBounds');
+    saveStateNow();
+    if (response === 1 || controlQuitRequested) {
+      app.quit();
+    } else {
+      // Release the settings renderer, while the output renderer and relay live on.
+      window.destroy();
+    }
+  })().catch((error) => {
+    console.error('[desktop] 关闭控制台失败:', error);
+    if (window && !window.isDestroyed() && !app.isQuitting) {
+      window.setEnabled(true);
+      sendTo(window, 'desktop:control-close-error', '暂时无法关闭控制台，请稍后重试。');
+    }
+  }).finally(() => {
+    controlCloseTask = null;
+    controlQuitRequested = false;
+  });
+  return controlCloseTask;
 }
 
 function createControlWindow(port) {
+  if (controlWindow && !controlWindow.isDestroyed()) return controlWindow;
   const bounds = clampBounds(appState.controlBounds, CONTROL_BOUNDS, 420, 620);
   controlWindow = new BrowserWindow({
     x: bounds.x,
@@ -556,24 +842,31 @@ function createControlWindow(port) {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
-      backgroundThrottling: false
+      backgroundThrottling: true
     }
   });
 
-  secureWindow(controlWindow, port);
-  controlWindow.once('ready-to-show', () => {
-    controlWindow.show();
-    controlWindow.moveTop();
-    controlWindow.focus();
+  const window = controlWindow;
+  secureWindow(window, port);
+  window.once('ready-to-show', () => {
+    if (window.isDestroyed() || app.isQuitting) return;
+    window.show();
+    window.moveTop();
+    window.focus();
   });
-  controlWindow.on('focus', () => controlWindow.moveTop());
-  controlWindow.on('resize', () => rememberBounds(controlWindow, 'controlBounds'));
-  controlWindow.on('move', () => rememberBounds(controlWindow, 'controlBounds'));
-  controlWindow.on('closed', () => {
-    controlWindow = null;
-    if (!app.isQuitting) app.quit();
+  window.on('focus', () => window.moveTop());
+  window.on('resize', () => rememberBounds(window, 'controlBounds'));
+  window.on('move', () => rememberBounds(window, 'controlBounds'));
+  window.on('close', (event) => {
+    if (app.isQuitting) return;
+    event.preventDefault();
+    requestControlClose(window);
   });
-  controlWindow.loadURL('http://127.0.0.1:' + port + '/desktop/index.html');
+  window.on('closed', () => {
+    if (controlWindow === window) controlWindow = null;
+  });
+  window.loadURL('http://127.0.0.1:' + port + '/desktop/index.html');
+  return window;
 }
 
 function resetOverlayBounds() {
@@ -591,47 +884,62 @@ function resetOverlayBounds() {
 }
 
 async function setOverlayContentSize(width, height) {
-  if (!overlayWindow || overlayWindow.isDestroyed()) return null;
   const targetWidth = Math.max(MIN_OVERLAY_BOUNDS.width, Math.min(3840, Math.round(Number(width) || OVERLAY_BOUNDS.width)));
   const targetHeight = Math.max(MIN_OVERLAY_BOUNDS.height, Math.min(2160, Math.round(Number(height) || OVERLAY_BOUNDS.height)));
+  const request = ++previewResizeRequest;
+  const window = overlayWindow;
+  const isCurrent = () => request === previewResizeRequest && window === overlayWindow && window && !window.isDestroyed();
   appState.requestedPreviewSize = { width: targetWidth, height: targetHeight };
   saveStateSoon();
+  if (!window || window.isDestroyed()) {
+    appState.previewSize = { width: targetWidth, height: targetHeight };
+    sendTo(controlWindow, 'desktop:overlay-bounds-changed', overlayGeometry());
+    publishOutputSettings();
+    return overlayGeometry();
+  }
   applyingPreviewSize = true;
   suppressRequestedViewportUntil = Date.now() + 1500;
   let actual;
   try {
-    actual = await readRendererViewport() || getPreviewSize();
+    actual = await readRendererViewport(window) || getPreviewSize();
+    if (!isCurrent()) return overlayGeometry();
     if (actual.width !== targetWidth || actual.height !== targetHeight) {
-      let revision = previewViewportRevision;
-      overlayWindow.setContentSize(targetWidth, targetHeight);
-      let report = await waitForPreviewViewport(revision, 350);
-      actual = report && report.size ? report.size : (await readRendererViewport() || actual);
+      const revision = previewViewportRevision;
+      window.setContentSize(targetWidth, targetHeight);
+      const report = await waitForPreviewViewport(revision, 350);
+      if (!isCurrent()) return overlayGeometry();
+      actual = report && report.size ? report.size : (await readRendererViewport(window) || actual);
     }
     for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (!isCurrent()) return overlayGeometry();
       if (actual.width === targetWidth && actual.height === targetHeight) break;
-      const bounds = overlayWindow.getBounds();
+      const bounds = window.getBounds();
       const revision = previewViewportRevision;
-      overlayWindow.setBounds({
+      window.setBounds({
         x: bounds.x,
         y: bounds.y,
         width: bounds.width + targetWidth - actual.width,
         height: bounds.height + targetHeight - actual.height
       });
       const report = await waitForPreviewViewport(revision, 350);
-      actual = report && report.size ? report.size : (await readRendererViewport() || actual);
+      if (!isCurrent()) return overlayGeometry();
+      actual = report && report.size ? report.size : (await readRendererViewport(window) || actual);
     }
-    actual = await readRendererViewport() || actual;
+    if (!isCurrent()) return overlayGeometry();
+    actual = await readRendererViewport(window) || actual;
   } finally {
-    applyingPreviewSize = false;
-    suppressRequestedViewportUntil = Date.now() + 1000;
+    if (request === previewResizeRequest) {
+      applyingPreviewSize = false;
+      suppressRequestedViewportUntil = Date.now() + 1000;
+    }
   }
+  if (!isCurrent()) return overlayGeometry();
   appState.requestedPreviewSize = { width: targetWidth, height: targetHeight };
   syncPreviewMetrics();
   return overlayGeometry();
 }
 
 async function resizeOverlay(width, height) {
-  if (!overlayWindow || overlayWindow.isDestroyed()) return null;
   return setOverlayContentSize(width, height);
 }
 
@@ -653,6 +961,7 @@ function setOverlayBounds(nextBounds) {
 
 function bindIpc() {
   ipcMain.handle('desktop:get-window-state', () => ({
+    appVersion: app.getVersion(),
     clickThrough,
     overlayStatus,
     overlayAvailable: !!(overlayWindow && !overlayWindow.isDestroyed()),
@@ -674,7 +983,10 @@ function bindIpc() {
     return { alwaysOnTop: !!enabled };
   });
   ipcMain.handle('desktop:resize-overlay', (_event, width, height) => resizeOverlay(width, height));
-  ipcMain.handle('desktop:set-overlay-bounds', (_event, bounds) => setOverlayBounds(bounds));
+  ipcMain.handle('desktop:set-overlay-bounds', (event, bounds) => {
+    if (!overlayWindow || overlayWindow.isDestroyed() || event.sender !== overlayWindow.webContents) return null;
+    return setOverlayBounds(bounds);
+  });
   ipcMain.on('desktop:preview-viewport', (event, viewport) => {
     if (!overlayWindow || overlayWindow.isDestroyed() || event.sender !== overlayWindow.webContents) return;
     acceptPreviewViewport(viewport);
@@ -693,18 +1005,7 @@ function bindIpc() {
       appState.settings,
       roomConnectionRequested ? appState.settings.roomId : ''
     ));
-    const wantsPreview = appState.settings.previewEnabled !== false;
-    if (roomConnectionRequested && (!overlayWindow || overlayWindow.isDestroyed())) {
-      createOverlayWindow(embeddedPort);
-    }
-    if (overlayWindow && !overlayWindow.isDestroyed()) {
-      if (wantsPreview && overlayHasConnected) {
-        overlayWindow.showInactive();
-        setClickThrough(clickThrough);
-      } else if (!wantsPreview) {
-        overlayWindow.hide();
-      }
-    }
+    syncPreviewWindow();
     publishOutputSettings();
     return true;
   });
@@ -718,64 +1019,52 @@ function bindIpc() {
       embedded.publishDesktopOutput('settings', Object.assign(outputState(), { settings: preview }));
     }
   });
-  ipcMain.handle('desktop:connect-room', (_event, roomId) => {
-    const normalized = String(roomId || '').trim();
-    if (!/^\d+$/.test(normalized)) return false;
-    roomConnectionRequested = true;
-    appState.settings = Object.assign({}, appState.settings, { roomId: normalized });
-    saveStateSoon();
-    clearScene();
-    beginRoomConnection();
-    createOverlayWindow(embeddedPort);
-    sendTo(overlayWindow, 'desktop:settings-changed', withPreviewCanvas(appState.settings, normalized));
-    publishOutputSettings();
-    return true;
-  });
-  ipcMain.on('desktop:overlay-ready', () => {
+  ipcMain.handle('desktop:connect-room', (_event, roomId) => connectDesktopRoom(roomId));
+  ipcMain.on('desktop:overlay-ready', (event) => {
+    if (!overlayWindow || overlayWindow.isDestroyed() || event.sender !== overlayWindow.webContents) return;
     sendTo(overlayWindow, 'desktop:settings-changed', withPreviewCanvas(
       appState.settings,
       roomConnectionRequested ? (appState.settings || {}).roomId : ''
     ));
     sendTo(overlayWindow, 'desktop:click-through-changed', clickThrough);
   });
-  ipcMain.on('desktop:overlay-status', (_event, status) => {
-    setReportedStatus(status);
-  });
-  ipcMain.handle('desktop:scene-message', (event, message) => {
-    if (!overlayWindow || overlayWindow.isDestroyed() || event.sender !== overlayWindow.webContents) return null;
-    return addSceneMessage(message);
-  });
   ipcMain.handle('desktop:dismiss-sc', (event, id) => {
     if (!overlayWindow || overlayWindow.isDestroyed() || event.sender !== overlayWindow.webContents) return false;
     return dismissSceneMessage(id);
   });
-  ipcMain.on('desktop:preview-messages', () => {
-    sendTo(overlayWindow, 'desktop:preview-messages');
-  });
+  ipcMain.on('desktop:preview-messages', addPreviewMessages);
   ipcMain.handle('desktop:copy-obs-url', () => {
     clipboard.writeText(obsUrl(embeddedPort));
     return true;
   });
   ipcMain.handle('desktop:reconnect-relay', () => {
-    if (embedded && embedded.relay && typeof embedded.relay.reconnectCurrent === 'function') {
+    if (liveScene && roomConnectionRequested) {
       clearScene();
-      embedded.relay.reconnectCurrent();
+      liveScene.reconnect().catch((error) => console.warn('[desktop] 重新连接失败:', error.message));
       return true;
     }
     return false;
   });
   ipcMain.on('desktop:show-overlay', () => {
-    if (overlayHasConnected && overlayWindow && !overlayWindow.isDestroyed()) {
+    if (overlayHasConnected || sceneMessages.length) {
+      setPreviewEnabled(true);
       setClickThrough(false);
-      overlayWindow.show();
-      overlayWindow.focus();
+      const window = syncPreviewWindow();
+      if (window && !window.webContents.isLoadingMainFrame()) {
+        window.show();
+        window.focus();
+      }
     }
   });
   ipcMain.on('desktop:reset-overlay-bounds', resetOverlayBounds);
   ipcMain.on('desktop:minimize', () => {
     if (controlWindow && !controlWindow.isDestroyed()) controlWindow.minimize();
   });
-  ipcMain.on('desktop:close', () => app.quit());
+  ipcMain.on('desktop:close', (event) => {
+    if (controlWindow && !controlWindow.isDestroyed() && event.sender === controlWindow.webContents) {
+      controlWindow.close();
+    }
+  });
 }
 
 const hasLock = app.requestSingleInstanceLock();
@@ -784,12 +1073,9 @@ if (!hasLock) {
 } else {
   app.on('second-instance', () => {
     setClickThrough(false);
-    if (controlWindow && !controlWindow.isDestroyed()) {
-      controlWindow.restore();
-      controlWindow.show();
-      controlWindow.focus();
-    }
+    showControlWindow();
   });
+  app.on('activate', showControlWindow);
 
   app.whenReady().then(async () => {
     Menu.setApplicationMenu(null);
@@ -807,11 +1093,24 @@ if (!hasLock) {
     embedded.setDesktopOutputBridge({
       getState: outputState
     });
+    liveScene = createLiveScene({
+      relay: embedded.relay,
+      getRoomInfo: embedded.getRoomInfo,
+      getRoomEmotes: embedded.getRoomEmotes,
+      onMessage: addSceneMessage,
+      onStatus: (status) => {
+        if (!app.isQuitting) setReportedStatus(status);
+      }
+    });
+    try {
+      ensureTray();
+    } catch (e) {
+      // Keep a usable console if Windows cannot create a notification icon.
+      console.warn('[desktop] 托盘图标创建失败:', e.message);
+    }
     createControlWindow(port);
     if (roomConnectionRequested) {
-      beginRoomConnection();
-      createOverlayWindow(port);
-      publishOutputSettings();
+      connectDesktopRoom(appState.settings.roomId);
     }
   }).catch((e) => {
     console.error('[desktop] 启动失败:', e);
@@ -821,13 +1120,22 @@ if (!hasLock) {
 
 app.on('before-quit', () => {
   app.isQuitting = true;
+  if (liveScene) liveScene.dispose();
+  liveScene = null;
+  clearPreviewRuntime();
+  if (scenePublishTimer !== null) clearTimeout(scenePublishTimer);
+  scenePublishTimer = null;
   rememberBounds(controlWindow, 'controlBounds');
   rememberBounds(overlayWindow, 'overlayBounds');
   saveStateNow();
 });
-app.on('window-all-closed', () => app.quit());
+app.on('window-all-closed', () => {
+  if (!app.isQuitting && (!appTray || appTray.isDestroyed())) app.quit();
+});
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
+  if (appTray && !appTray.isDestroyed()) appTray.destroy();
+  appTray = null;
   if (embedded) {
     try {
       embedded.relay.shutDown();

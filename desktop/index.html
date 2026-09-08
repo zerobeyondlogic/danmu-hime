@@ -13,6 +13,7 @@
     <div class="drag-region">
       <span class="brand-mark"></span>
       <span class="brand-name">DANMU HIME</span>
+      <span id="appVersion" class="brand-version hidden"></span>
       <span class="window-kind">CONTROL</span>
     </div>
     <div class="window-actions">
@@ -203,6 +204,28 @@
       </div>
     </section>
   </div>
+
+  <dialog id="controlCloseDialog" class="control-close-dialog" aria-labelledby="controlCloseTitle" aria-describedby="controlCloseDescription">
+    <div class="control-close-heading">
+      <span class="control-close-kicker">DANMU HIME</span>
+      <h2 id="controlCloseTitle">关闭控制台</h2>
+      <p id="controlCloseDescription">收起后，弹幕接收与 OBS 输出继续运行。</p>
+    </div>
+    <div id="controlCloseChoices" class="control-close-choices">
+      <button id="controlCloseTrayButton" class="control-close-option control-close-primary" type="button" autofocus>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v10m-4-4 4 4 4-4M4 13v6a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6"/></svg>
+        <span><b>收起到托盘</b><small>弹幕接收、预览与 OBS 输出继续运行</small></span>
+        <span class="control-close-arrow" aria-hidden="true">→</span>
+      </button>
+      <button id="controlCloseQuitButton" class="control-close-option" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v9m-5.5-7a9 9 0 1 0 11 0"/></svg>
+        <span><b>退出程序</b><small>停止弹幕接收、预览与 OBS 输出</small></span>
+      </button>
+      <p class="control-close-hint">点击任务栏右下角的弹幕姬图标，可重新打开控制台。</p>
+      <button id="controlCloseCancelButton" class="control-close-cancel" type="button">取消</button>
+    </div>
+    <button id="controlCloseReturnButton" class="control-close-return hidden" type="button">返回控制台</button>
+  </dialog>
 
   <script src="../js/lib/qrcode.js"></script>
   <script src="renderer.js"></script>

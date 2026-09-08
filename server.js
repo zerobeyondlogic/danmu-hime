@@ -41,6 +41,8 @@ const ROOM_EMOTE_CACHE_TTL = 10 * 60 * 1000;
 const emoteImageCache = new Map();
 const MAX_EMOTE_IMAGE_CACHE = 48;
 const MAX_EMOTE_IMAGE_BYTES = 3 * 1024 * 1024;
+const MAX_EMOTE_IMAGE_CACHE_BYTES = 24 * 1024 * 1024;
+let emoteImageCacheBytes = 0;
 const userAvatarCache = new Map();
 const USER_AVATAR_CACHE_TTL = 6 * 60 * 60 * 1000;
 const MAX_USER_AVATAR_CACHE = 512;
@@ -51,15 +53,23 @@ function setDesktopOutputBridge(bridge) {
   desktopOutputBridge = bridge || null;
 }
 
+function desktopOutputEvent(type, data) {
+  return 'event: ' + String(type || 'message') + '\n' +
+    'data: ' + JSON.stringify(data === undefined ? null : data) + '\n\n';
+}
+
 function writeDesktopOutputEvent(client, type, data) {
-  client.write('event: ' + String(type || 'message') + '\n' +
-    'data: ' + JSON.stringify(data === undefined ? null : data) + '\n\n');
+  client.write(desktopOutputEvent(type, data));
 }
 
 function publishDesktopOutput(type, data) {
+  if (!desktopOutputClients.size) return;
+  // Scene publishers can supply a snapshot factory to avoid copying an
+  // unused scene. All subscribers share one snapshot and serialization.
+  const payload = desktopOutputEvent(type, typeof data === 'function' ? data() : data);
   for (const client of desktopOutputClients) {
     try {
-      writeDesktopOutputEvent(client, type, data);
+      client.write(payload);
     } catch (e) {
       desktopOutputClients.delete(client);
     }
@@ -220,9 +230,16 @@ async function proxyEmoteImage(res, rawUrl) {
       return json(res, 413, { ok: false, error: 'emote image too large' });
     }
     cached = { body, contentType };
+    // Concurrent misses for one URL may complete after another request has
+    // cached it, so replace its byte accounting instead of counting it twice.
+    const previous = emoteImageCache.get(url);
+    if (previous) emoteImageCacheBytes -= previous.body.length;
     emoteImageCache.set(url, cached);
-    while (emoteImageCache.size > MAX_EMOTE_IMAGE_CACHE) {
-      emoteImageCache.delete(emoteImageCache.keys().next().value);
+    emoteImageCacheBytes += body.length;
+    while (emoteImageCache.size > MAX_EMOTE_IMAGE_CACHE || emoteImageCacheBytes > MAX_EMOTE_IMAGE_CACHE_BYTES) {
+      const oldestUrl = emoteImageCache.keys().next().value;
+      emoteImageCacheBytes -= emoteImageCache.get(oldestUrl).body.length;
+      emoteImageCache.delete(oldestUrl);
     }
   }
 
@@ -503,4 +520,8 @@ server.on('error', (err) => {
   throw err;
 });
 
-module.exports = { server, relay, setDesktopOutputBridge, publishDesktopOutput };
+module.exports = {
+  server, relay, setDesktopOutputBridge, publishDesktopOutput,
+  getRoomInfo: proxyRoomInfo,
+  getRoomEmotes: proxyRoomEmotes
+};

@@ -59,5 +59,7 @@
     ]);
   }
 
-  root.DanmuAvatars = { normalizeUrl, extractDanmakuAvatar, extractEventAvatar };
+  const api = { normalizeUrl, extractDanmakuAvatar, extractEventAvatar };
+  if (typeof module === 'object' && module.exports) module.exports = api;
+  if (root) root.DanmuAvatars = api;
 })(typeof window !== 'undefined' ? window : globalThis);

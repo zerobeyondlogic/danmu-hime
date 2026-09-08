@@ -202,7 +202,10 @@ function createWebSocketReader(handlers) {
 
 function createRelay(server, deps) {
   const { getUserInfo, roomInfoFetcher, danmuInfoFetcher, getCookies } = deps;
+  const connectTls = deps.connectTls || tls.connect;
+  const parseFrames = deps.parseFrames || protocol.parseFrames;
   const clients = new Set();
+  const listeners = new Set();
   const commandHistory = createCommandHistory(MAX_REPLAY_COMMANDS);
   let bili = null;
   let biliRoom = null;
@@ -215,6 +218,15 @@ function createRelay(server, deps) {
   let connectionGeneration = 0;
 
   function broadcast(obj) {
+    const event = { ...obj, room: biliRoom };
+    for (const listener of listeners) {
+      try { listener(event); } catch (e) {
+        console.error('[relay] subscriber error:', e.message);
+      }
+    }
+    // Desktop consumers use objects directly. Only legacy browser clients
+    // need a JSON copy and a WebSocket frame.
+    if (clients.size === 0) return;
     const msg = wsServerFrame(JSON.stringify(obj));
     for (const c of clients) {
       try {
@@ -257,6 +269,7 @@ function createRelay(server, deps) {
     let token = null;
     try {
       const ri = await roomInfoFetcher(biliRoom);
+      if (closing || generation !== connectionGeneration) return;
       if (ri.ok && ri.roomId) realId = ri.roomId;
       const di = await danmuInfoFetcher(realId);
       if (di.ok && di.token) {
@@ -331,6 +344,7 @@ function createRelay(server, deps) {
     }
 
     function handleFrame(f, socket, sendPacket) {
+      if (closing || generation !== connectionGeneration || bili !== socket || socket.destroyed) return;
       if (f.op === 8) {
         gotAuthReply = true;
         let code = -1;
@@ -369,14 +383,17 @@ function createRelay(server, deps) {
     function enqueueChunk(chunk, socket, sendPacket) {
       queue = queue
         .then(async () => {
-          if (generation !== connectionGeneration) return;
+          if (closing || generation !== connectionGeneration || bili !== socket || socket.destroyed) return;
           biliPacketBuf = Buffer.concat([biliPacketBuf, Buffer.from(chunk)]);
           if (biliPacketBuf.length > MAX_WS_BUFFER) throw new Error('Bilibili packet buffer exceeded safety limit');
-          const { frames, rest } = await protocol.parseFrames(new Uint8Array(biliPacketBuf));
+          const { frames, rest } = await parseFrames(new Uint8Array(biliPacketBuf));
+          // Decompression can finish after a room switch or a reconnect.
+          if (closing || generation !== connectionGeneration || bili !== socket || socket.destroyed) return;
           biliPacketBuf = Buffer.from(rest);
           for (const f of frames) handleFrame(f, socket, sendPacket);
         })
         .catch((e) => {
+          if (closing || generation !== connectionGeneration || bili !== socket || socket.destroyed) return;
           console.log('[relay] packet parse error:', e.message);
           advanceFailover('parse');
           try {
@@ -387,7 +404,8 @@ function createRelay(server, deps) {
 
     function connectOnce(host, port, realId) {
       setStatus('connecting');
-      const socket = tls.connect({ host: host, port: port }, () => {
+      const socket = connectTls({ host: host, port: port }, () => {
+        if (closing || generation !== connectionGeneration || bili !== socket || socket.destroyed) return;
         const key = crypto.randomBytes(16).toString('base64');
         const headers = [
           'GET /sub HTTP/1.1',
@@ -430,6 +448,7 @@ function createRelay(server, deps) {
       });
 
       socket.on('data', (d) => {
+        if (closing || generation !== connectionGeneration || bili !== socket || socket.destroyed) return;
         lastInboundAt = Date.now();
         if (!upgraded) {
           handshakeBuf = Buffer.concat([handshakeBuf, d]);
@@ -492,10 +511,28 @@ function createRelay(server, deps) {
   }
 
   function connectRoom(wantRoom) {
+    wantRoom = String(wantRoom || '').trim();
+    if (!/^\d+$/.test(wantRoom)) {
+      disconnectRoom();
+      return;
+    }
     if (wantRoom === biliRoom) return;
     commandHistory.clear();
     biliRoom = wantRoom;
     reconnectCurrent();
+  }
+
+  function disconnectRoom() {
+    closing = true;
+    connectionGeneration += 1;
+    biliRoom = null;
+    commandHistory.clear();
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+    stopBilibili();
+    setStatus('disconnected');
   }
 
   function reconnectCurrent() {
@@ -515,19 +552,14 @@ function createRelay(server, deps) {
   }
 
   function shutDown() {
-    closing = true;
-    connectionGeneration += 1;
-    if (reconnectTimer) {
-      clearTimeout(reconnectTimer);
-      reconnectTimer = null;
-    }
-    stopBilibili();
+    disconnectRoom();
     for (const c of clients) {
       try {
         c.destroy();
       } catch (e) {}
     }
     clients.clear();
+    listeners.clear();
   }
 
   server.on('upgrade', (req, socket, head) => {
@@ -572,7 +604,12 @@ function createRelay(server, deps) {
     }
   });
 
-  return { connectRoom, reconnectCurrent, shutDown };
+  function subscribe(listener) {
+    listeners.add(listener);
+    return () => listeners.delete(listener);
+  }
+
+  return { connectRoom, reconnectCurrent, disconnectRoom, subscribe, shutDown };
 }
 
 function wsClientFrame(payload, opcode, fin) {

@@ -24,6 +24,9 @@
         offsets.set(view.getUint32(offset, true), offset);
       }
       return { view, offsets, units };
+    }).catch((error) => {
+      fontPromise = null;
+      throw error;
     });
     return fontPromise;
   }
@@ -65,6 +68,9 @@
   function render(element, font, color) {
     if (!element || !element.isConnected || !font) return;
     const text = element.dataset.pixelText || element.textContent || '';
+    let layoutWidth = element.offsetWidth;
+    const layoutHeight = element.offsetHeight;
+    if (layoutWidth < 2 || layoutHeight < 2) return;
     let canvas = element.querySelector(':scope > .pixel-canvas');
     if (!canvas) {
       canvas = document.createElement('canvas');
@@ -73,9 +79,6 @@
       element.appendChild(canvas);
     }
 
-    let layoutWidth = element.offsetWidth;
-    const layoutHeight = element.offsetHeight;
-    if (layoutWidth < 2 || layoutHeight < 2) return;
     const style = getComputedStyle(element);
     const fontSize = parseFloat(style.fontSize) || 12;
     const lineHeight = parseFloat(style.lineHeight) || fontSize * 1.25;

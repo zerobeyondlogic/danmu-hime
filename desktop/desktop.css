@@ -77,6 +77,7 @@ button { border: 0; }
 }
 
 .brand-name,
+.brand-version,
 .window-kind,
 .eyebrow,
 .section-label small,
@@ -98,6 +99,12 @@ button { border: 0; }
   letter-spacing: 0.14em;
 }
 
+.brand-version {
+  color: var(--cool);
+  font-size: 9px;
+  white-space: nowrap;
+}
+
 .window-actions {
   height: 100%;
   display: flex;
@@ -114,6 +121,59 @@ button { border: 0; }
 
 .window-actions button:hover { color: var(--ink); background: rgba(255, 255, 255, 0.045); }
 .window-actions .close:hover { color: #fff; background: rgba(210, 74, 94, 0.58); }
+
+body.control-close-open .drag-region { -webkit-app-region: no-drag; }
+
+.control-close-dialog {
+  width: min(372px, calc(100% - 36px));
+  max-height: calc(100% - 36px);
+  margin: auto;
+  padding: 25px 24px 16px;
+  overflow-y: auto;
+  border: 1px solid rgba(174, 204, 217, 0.15);
+  border-radius: 17px;
+  color: var(--ink);
+  background: #191f26;
+  box-shadow: 0 20px 65px rgba(0, 0, 0, 0.42);
+  -webkit-app-region: no-drag;
+  scrollbar-width: thin;
+}
+
+.control-close-dialog::backdrop { background: rgba(5, 9, 14, 0.64); }
+.control-close-kicker { color: var(--cool); font: 9px var(--mono); letter-spacing: 0.16em; }
+.control-close-heading h2 { margin: 9px 0 8px; font-size: 22px; font-weight: 620; letter-spacing: -0.03em; }
+.control-close-heading p { margin: 0; color: var(--ink-soft); font-size: 11px; line-height: 1.8; overflow-wrap: anywhere; }
+.control-close-choices { margin-top: 23px; }
+.control-close-option {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 14px;
+  border: 1px solid rgba(201, 217, 228, 0.065);
+  border-radius: 11px;
+  color: var(--ink-soft);
+  background: var(--local);
+  text-align: left;
+  cursor: pointer;
+}
+.control-close-option + .control-close-option { margin-top: 10px; }
+.control-close-option:hover { color: var(--ink); background: var(--local-hover); }
+.control-close-option svg { flex: 0 0 21px; width: 21px; height: 21px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.control-close-option > span:not(.control-close-arrow) { flex: 1; min-width: 0; }
+.control-close-option b { display: block; color: var(--ink); font-size: 13px; font-weight: 590; }
+.control-close-option small { display: block; margin-top: 5px; color: var(--ink-faint); font-size: 9px; line-height: 1.65; }
+.control-close-primary { border-color: rgba(145, 194, 209, 0.3); color: var(--cool); background: var(--cool-soft); }
+.control-close-primary:hover { background: rgba(145, 194, 209, 0.21); color: var(--cool); }
+.control-close-primary small { color: var(--ink-soft); }
+.control-close-arrow { flex: 0 0 auto; align-self: center; font-size: 17px; }
+.control-close-hint { margin: 17px 0 12px; color: var(--ink-faint); font-size: 9px; line-height: 1.7; text-align: center; }
+.control-close-cancel,
+.control-close-return { width: 100%; height: 36px; border-radius: 8px; color: var(--ink-soft); background: transparent; font-size: 11px; cursor: pointer; }
+.control-close-cancel:hover { color: var(--ink); background: var(--local); }
+.control-close-return { height: 40px; margin-top: 23px; color: var(--ink); background: var(--cool-soft); }
+.control-close-return:hover { background: rgba(145, 194, 209, 0.21); }
+.control-close-dialog button:focus-visible { outline: 2px solid var(--cool); outline-offset: 3px; }
 
 .control-shell {
   height: calc(100% - 42px);

@@ -43,7 +43,10 @@
   let pixelBitmapMigrationPending = false;
   let currentOverlayBounds = { width: 450, height: 650 };
   let avatarResizeQueue = Promise.resolve();
+  let settingsReady = false;
   const els = {};
+  let controlCloseToken = null;
+  let controlCloseFocus = null;
 
   function cloneThemeConfig(theme) {
     return Object.assign({}, DEFAULT_THEME_CONFIGS[theme]);
@@ -101,6 +104,106 @@
 
   function persistNow() {
     return window.DesktopOverlay.saveSettings(settings);
+  }
+
+  function openControlCloseDialog(payload, errorMessage) {
+    const dialog = byId('controlCloseDialog');
+    const isError = typeof errorMessage === 'string';
+    if (!isError && (!payload || typeof payload.token !== 'string')) return;
+    controlCloseToken = isError ? null : payload.token;
+    byId('controlCloseTitle').textContent = isError ? '暂时无法关闭' : '关闭控制台';
+    byId('controlCloseDescription').textContent = isError
+      ? errorMessage || '暂时无法保存设置，请返回控制台后重试。'
+      : '收起后，弹幕接收与 OBS 输出继续运行。';
+    byId('controlCloseChoices').classList.toggle('hidden', isError);
+    byId('controlCloseReturnButton').classList.toggle('hidden', !isError);
+    if (!dialog.open) {
+      controlCloseFocus = document.activeElement;
+      document.body.classList.add('control-close-open');
+      dialog.showModal();
+    }
+    byId(isError ? 'controlCloseReturnButton' : 'controlCloseTrayButton').focus();
+  }
+
+  function finishControlCloseDialog(action) {
+    const dialog = byId('controlCloseDialog');
+    if (!dialog.open) return;
+    const token = controlCloseToken;
+    controlCloseToken = null;
+    dialog.close();
+    document.body.classList.remove('control-close-open');
+    if (controlCloseFocus && controlCloseFocus.isConnected) controlCloseFocus.focus({ preventScroll: true });
+    controlCloseFocus = null;
+    // Remove the top-layer dialog before main starts the existing save handshake.
+    if (token !== null) window.DesktopOverlay.controlCloseChoice(token, action);
+  }
+
+  function bindControlCloseDialog() {
+    const dialog = byId('controlCloseDialog');
+    let backdropPointerDown = false;
+    const outsideDialog = (event) => {
+      if (event.target !== dialog) return false;
+      const bounds = dialog.getBoundingClientRect();
+      return event.clientX < bounds.left || event.clientX > bounds.right ||
+        event.clientY < bounds.top || event.clientY > bounds.bottom;
+    };
+    dialog.addEventListener('pointerdown', (event) => {
+      backdropPointerDown = outsideDialog(event);
+    });
+    dialog.addEventListener('click', (event) => {
+      if (backdropPointerDown && outsideDialog(event)) finishControlCloseDialog('cancel');
+      backdropPointerDown = false;
+    });
+    dialog.addEventListener('cancel', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      finishControlCloseDialog('cancel');
+    });
+    dialog.addEventListener('keydown', (event) => {
+      // Keep Tab within the dialog, including when an underlying editor is open.
+      event.stopPropagation();
+      if (event.key !== 'Tab') return;
+      const buttons = Array.from(dialog.querySelectorAll('button')).filter((button) => button.getClientRects().length && !button.disabled);
+      const first = buttons[0];
+      const last = buttons[buttons.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    });
+    byId('controlCloseTrayButton').addEventListener('click', () => finishControlCloseDialog('tray'));
+    byId('controlCloseQuitButton').addEventListener('click', () => finishControlCloseDialog('quit'));
+    byId('controlCloseCancelButton').addEventListener('click', () => finishControlCloseDialog('cancel'));
+    byId('controlCloseReturnButton').addEventListener('click', () => finishControlCloseDialog('cancel'));
+    byId('minimizeButton').addEventListener('click', () => window.DesktopOverlay.minimize());
+    byId('closeButton').addEventListener('click', () => window.DesktopOverlay.close());
+    window.DesktopOverlay.onControlClosePrompt((payload) => openControlCloseDialog(payload));
+    window.DesktopOverlay.onControlCloseError((message) => openControlCloseDialog(null, String(message || '')));
+  }
+
+  async function prepareControlClose(token) {
+    try {
+      // Before controls are bound, the main process already owns the saved
+      // settings. Do not overwrite them with this page's initial defaults.
+      if (settingsReady) {
+        await avatarResizeQueue;
+        if (saveTimer !== null) {
+          clearTimeout(saveTimer);
+          saveTimer = null;
+        }
+        if (previewFrame !== null) {
+          cancelAnimationFrame(previewFrame);
+          previewFrame = null;
+        }
+        await persistNow();
+      }
+      window.DesktopOverlay.controlClosePrepared(token, true);
+    } catch (error) {
+      window.DesktopOverlay.controlClosePrepared(token, false);
+    }
   }
 
   function previewNow() {
@@ -387,8 +490,6 @@
   }
 
   function bindEvents() {
-    els.minimizeButton.addEventListener('click', () => window.DesktopOverlay.minimize());
-    els.closeButton.addEventListener('click', () => window.DesktopOverlay.close());
     els.connectButton.addEventListener('click', connectRoom);
     els.roomInput.addEventListener('keydown', (event) => {
       if (event.key === 'Enter') connectRoom();
@@ -515,11 +616,12 @@
     window.DesktopOverlay.onClickThroughChanged(setClickThroughState);
     window.DesktopOverlay.onOverlayStatusChanged(setStatus);
     window.DesktopOverlay.onOverlayBoundsChanged(setOverlaySizeFields);
+    window.DesktopOverlay.onPreviewEnabledChanged(setPreviewEnabled);
   }
 
   async function init() {
     [
-      'minimizeButton', 'closeButton', 'statusCard', 'statusText', 'roomInput',
+      'minimizeButton', 'closeButton', 'appVersion', 'statusCard', 'statusText', 'roomInput',
       'roomHint', 'connectButton',
       'alwaysOnTopInput', 'clickThroughButton', 'showOverlayButton',
       'resetOverlayButton', 'testMessageButton', 'loginStatus', 'loginDetail',
@@ -558,9 +660,14 @@
     setOverlaySizeLocked(settings.overlaySizeLocked === true);
     setPreviewEnabled(settings.previewEnabled !== false);
     updateThemeButtons();
+    settingsReady = true;
     bindEvents();
 
     const state = await window.DesktopOverlay.getWindowState();
+    const appVersion = String(state.appVersion || '').trim();
+    els.appVersion.textContent = appVersion ? 'v' + appVersion : '';
+    els.appVersion.classList.toggle('hidden', !appVersion);
+    els.appVersion.setAttribute('aria-label', '当前运行版本 ' + appVersion);
     els.obsUrlInput.value = state.obsUrl || '';
     overlayAvailable = !!state.overlayAvailable;
     setOverlaySizeFields(state.overlayViewport || state.overlayBounds);
@@ -575,6 +682,8 @@
     await initLoginStatus();
   }
 
+  bindControlCloseDialog();
+  window.DesktopOverlay.onPrepareControlClose(prepareControlClose);
   window.addEventListener('beforeunload', stopQrPoll);
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', init);

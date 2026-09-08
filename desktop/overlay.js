@@ -13,8 +13,8 @@
     captain: '舰长',
     viewer: ''
   };
-  const GUARD_ROLES = { 1: 'governor', 2: 'admiral', 3: 'captain' };
   const MAX_MESSAGES = 48;
+  const MAX_AVATAR_URLS = 512;
   const MIN_CANVAS_WIDTH = 240;
   const MIN_CANVAS_HEIGHT = 160;
   const THEME_CONFIG_VERSION = 3;
@@ -32,21 +32,25 @@
     themeConfigs: null,
     themeConfigVersion: THEME_CONFIG_VERSION
   };
-  let client = null;
-  let connectedRoomId = '';
-  let ownerUid = 0;
-  let roomEmoteAliases = {};
   const avatarUrlCache = new Map();
   const avatarLookupPending = new Map();
-  let lastMessageAt = 0;
-  let connectGeneration = 0;
-  let pixelRenderTimer = null;
+  const avatarSources = new WeakMap();
+  let messageRenderFrame = null;
+  let redrawAllPixelRows = false;
+  const pendingPixelRows = new Set();
   let bitmapPixelFont = null;
+  let bitmapPixelFontLoad = null;
+  let pixelFontScriptLoad = null;
+  let pixelIntersectionObserver = null;
+  let pixelResizeObserver = null;
+  let pixelModeActive = false;
+  const pixelRowSizes = new WeakMap();
+  const pixelObservedRows = new Set();
+  const visiblePixelRows = new Set();
   let resizeSession = null;
   let resizeFrame = null;
   let pendingResize = null;
   let viewportReportFrame = null;
-  let scenePublishQueue = Promise.resolve();
   let canvasWidth = 720;
   let canvasHeight = 900;
   let renderedSceneRevision = -1;
@@ -164,15 +168,15 @@
     document.body.style.setProperty('--admiral', config.admiralColor);
     document.body.style.setProperty('--captain', config.captainColor);
     document.body.classList.toggle('show-avatars', config.showAvatar !== false);
+    if (config.showAvatar !== false) {
+      els.messageStack.querySelectorAll('.message-avatar').forEach(loadAvatar);
+    }
     const surfaceOpacity = config.surfaceOpacity / 100;
     root.setProperty('--surface-opacity', surfaceOpacity.toFixed(2));
     root.setProperty('--surface-blur', (20 * surfaceOpacity).toFixed(1) + 'px');
     root.setProperty('--surface-saturation', (100 + 8 * surfaceOpacity).toFixed(1) + '%');
     root.setProperty('--surface-texture-opacity', (0.24 * surfaceOpacity).toFixed(3));
-    requestAnimationFrame(() => {
-      pruneMessages();
-      if (settings.theme === 'pixel') renderAllPixelRows();
-    });
+    scheduleMessageRender(null, true);
   }
 
   function pad(number) {
@@ -193,23 +197,6 @@
     }
     const totalSeconds = Math.round(milliseconds / 1000);
     return Math.floor(totalSeconds / 60) + 'm ' + (totalSeconds % 60) + 's';
-  }
-
-  function consumeGap(override) {
-    const now = Date.now();
-    const gap = Number.isFinite(override) ? override : (lastMessageAt ? now - lastMessageAt : null);
-    lastMessageAt = now;
-    return gap;
-  }
-
-  function roleFromGuardLevel(level) {
-    return GUARD_ROLES[Number(level) || 0] || 'viewer';
-  }
-
-  function resolveRole(uid, isManager, guardLevel) {
-    if (ownerUid > 0 && Number(uid) === ownerUid) return 'host';
-    if (isManager) return 'manager';
-    return roleFromGuardLevel(guardLevel);
   }
 
   function leaf(className, text) {
@@ -248,16 +235,39 @@
       .then((response) => response.json())
       .then((result) => {
         const url = result && result.ok ? String(result.avatarUrl || '') : '';
-        avatarUrlCache.set(key, url);
+        cacheAvatarUrl(key, url);
         return url;
       })
       .catch(() => {
-        avatarUrlCache.set(key, '');
+        cacheAvatarUrl(key, '');
         return '';
       })
       .finally(() => avatarLookupPending.delete(key));
     avatarLookupPending.set(key, pending);
     return pending;
+  }
+
+  function cacheAvatarUrl(key, url) {
+    avatarUrlCache.delete(key);
+    avatarUrlCache.set(key, url);
+    while (avatarUrlCache.size > MAX_AVATAR_URLS) {
+      avatarUrlCache.delete(avatarUrlCache.keys().next().value);
+    }
+  }
+
+  function loadAvatar(avatar) {
+    const source = avatarSources.get(avatar);
+    if (!source || source.started || !avatar.isConnected || currentThemeConfig().showAvatar === false) return;
+    source.started = true;
+    const pending = source.url ? Promise.resolve(source.url) : lookupAvatar(source.uid);
+    pending.then((url) => {
+      if (avatar.isConnected && currentThemeConfig().showAvatar !== false) {
+        applyAvatarImage(avatar, url);
+      } else {
+        // A later toggle can load it from the bounded URL cache.
+        source.started = false;
+      }
+    });
   }
 
   function makeAvatar(message) {
@@ -268,10 +278,10 @@
     fallback.className = 'message-avatar-fallback';
     fallback.textContent = avatarInitial(message.uname);
     avatar.appendChild(fallback);
-    if (message.avatarUrl) {
-      applyAvatarImage(avatar, message.avatarUrl);
-    } else if (Number(message.uid) > 0) {
-      lookupAvatar(message.uid).then((url) => applyAvatarImage(avatar, url));
+    if (message.avatarUrl || Number(message.uid) > 0) {
+      avatarSources.set(avatar, { uid: message.uid, url: message.avatarUrl, started: false });
+      // Wait until the card is attached; discarded or hidden avatars need no request.
+      queueMicrotask(() => loadAvatar(avatar));
     }
     return avatar;
   }
@@ -313,17 +323,16 @@
       image.loading = 'eager';
       image.decoding = 'async';
       image.referrerPolicy = 'no-referrer';
-      const pixelCanvas = document.createElement('canvas');
-      pixelCanvas.className = 'emote-pixel-canvas';
-      pixelCanvas.setAttribute('aria-hidden', 'true');
       image.addEventListener('load', () => {
-        if (settings.theme === 'pixel') renderPixelEmote(image);
+        // The image's natural width can also change the text wrapping.
+        if (settings.theme === 'pixel') scheduleMessageRender(image.closest('.message-row'));
       });
       image.addEventListener('error', () => {
         visual.replaceWith(document.createTextNode(nextKey));
+        if (settings.theme === 'pixel') scheduleMessageRender(element.closest('.message-row'));
       }, { once: true });
       image.src = '/api/emote_image?url=' + encodeURIComponent(emotes[nextKey].url);
-      visual.append(image, pixelCanvas);
+      visual.appendChild(image);
       element.appendChild(visual);
       cursor = nextIndex + nextKey.length;
     }
@@ -382,10 +391,10 @@
 
   function pruneMessages() {
     const stack = els.messageList;
-    let rows = stack.querySelectorAll(':scope > .message-row');
-    while (rows.length > MAX_MESSAGES) {
-      rows[0].remove();
-      rows = stack.querySelectorAll(':scope > .message-row');
+    const rows = stack.querySelectorAll(':scope > .message-row');
+    for (let index = 0; index < rows.length - MAX_MESSAGES; index += 1) {
+      forgetPixelRow(rows[index]);
+      rows[index].remove();
     }
   }
 
@@ -421,8 +430,10 @@
         return;
       }
       setTimeout(() => {
+        forgetPixelRow(row);
         row.remove();
         updateEmptyState();
+        scheduleMessageRender();
       }, 190);
     }).catch(() => resetSwipeRow(row));
   }
@@ -464,42 +475,6 @@
     row.addEventListener('pointercancel', finishSwipe);
   }
 
-  function appendMessage(message, sceneId) {
-    const row = makeMessageRow(message);
-    if (sceneId !== undefined && sceneId !== null) {
-      row.dataset.sceneId = String(sceneId);
-      row.dataset.sceneMessage = JSON.stringify(message);
-    }
-    const target = message.type === 'sc' ? els.pinnedScStack : els.messageList;
-    target.appendChild(row);
-    if (message.type === 'sc') bindScSwipe(row);
-    updateEmptyState();
-    requestAnimationFrame(() => {
-      pruneMessages();
-      if (settings.theme === 'pixel') renderPixelRow(row);
-    });
-    return row;
-  }
-
-  function addMessage(message, gapOverride) {
-    const gapMs = consumeGap(gapOverride);
-    const normalized = Object.assign({}, message, {
-      gapMs,
-      time: message.time || timeNow(),
-      at: lastMessageAt,
-      emotes: Object.assign({}, message.emotes || {})
-    });
-    if (!isObsMode && desktopApi && typeof desktopApi.publishSceneMessage === 'function') {
-      scenePublishQueue = scenePublishQueue.then(async () => {
-        const accepted = await desktopApi.publishSceneMessage(normalized);
-        if (accepted) appendMessage(accepted, accepted.id);
-        else appendMessage(normalized);
-      }).catch(() => appendMessage(normalized));
-      return;
-    }
-    appendMessage(normalized);
-  }
-
   function renderSceneSnapshot(scene) {
     if (!scene || !Array.isArray(scene.messages)) return;
     const revision = Number(scene.revision);
@@ -509,6 +484,7 @@
       existing.set(row.dataset.sceneId, row);
     });
     const keep = new Set();
+    const orderedRows = new Map([[els.pinnedScStack, []], [els.messageList, []]]);
     scene.messages.forEach((message) => {
       const id = String(message && message.id || '');
       if (!id) return;
@@ -520,173 +496,54 @@
         replacement.dataset.sceneId = id;
         replacement.dataset.sceneMessage = signature;
         if (message.type === 'sc') bindScSwipe(replacement);
-        if (row) row.replaceWith(replacement);
+        if (row) {
+          forgetPixelRow(row);
+          row.replaceWith(replacement);
+        }
         row = replacement;
+        scheduleMessageRender(row);
       }
       const target = message.type === 'sc' ? els.pinnedScStack : els.messageList;
-      target.appendChild(row);
+      orderedRows.get(target).push(row);
     });
     existing.forEach((row, id) => {
-      if (!keep.has(id)) row.remove();
-    });
-    updateEmptyState();
-    if (!isObsMode && scene.messages.length) {
-      const latestAt = Number(scene.messages[scene.messages.length - 1].at);
-      if (Number.isFinite(latestAt)) lastMessageAt = latestAt;
-    }
-    if (Number.isFinite(revision)) renderedSceneRevision = revision;
-    requestAnimationFrame(() => {
-      pruneMessages();
-      if (settings.theme === 'pixel') renderAllPixelRows();
-    });
-  }
-
-  function clearDisplayedScene() {
-    els.messageStack.querySelectorAll('.message-row').forEach((row) => row.remove());
-    updateEmptyState();
-    lastMessageAt = 0;
-    renderedSceneRevision = -1;
-  }
-
-  function parseDanmaku(obj) {
-    const info = Array.isArray(obj.info) ? obj.info : [];
-    const user = Array.isArray(info[2]) ? info[2] : [];
-    const medal = Array.isArray(info[3]) ? info[3] : [];
-    const uid = Number(user[0]) || 0;
-    const guardLevel = Number(info[7]) || 0;
-    const text = String(info[1] || '');
-    const packetEmotes = window.DanmuEmotes.extractDanmakuEmotes(obj, info);
-    return {
-      type: 'chat',
-      uid,
-      uname: user[1] || '',
-      text,
-      emotes: window.DanmuEmotes.mergeRoomEmotes(text, packetEmotes, roomEmoteAliases),
-      avatarUrl: window.DanmuAvatars ? window.DanmuAvatars.extractDanmakuAvatar(obj, info) : '',
-      role: resolveRole(uid, Number(user[2]) === 1, guardLevel),
-      medal: medal[1] ? String(medal[1]) + ' ' + (Number(medal[0]) || 0) : ''
-    };
-  }
-
-  function guardLevelFromName(name) {
-    const text = String(name || '');
-    if (text.includes('总督')) return 1;
-    if (text.includes('提督')) return 2;
-    if (text.includes('舰长')) return 3;
-    return 0;
-  }
-
-  function giftContext(obj, gift) {
-    const cmd = String(obj.cmd || '').split(':')[0];
-    const data = obj.data || {};
-    const userInfo = data.user_info || {};
-    const senderBase = data.sender_uinfo && data.sender_uinfo.base ? data.sender_uinfo.base : {};
-    const medal = data.medal_info || userInfo.medal_info || {};
-    const uid = Number(data.uid || userInfo.uid || senderBase.uid) || 0;
-    const isManager = Number(userInfo.manager || data.is_admin) === 1;
-    const guardLevel = Number(data.guard_level || userInfo.guard_level) || guardLevelFromName(gift.giftName);
-    const role = resolveRole(uid, isManager, guardLevel);
-    const valueYuan = gift.coinIsYuan ? Number(gift.coin) || 0 : (Number(gift.coin) || 0) / 1000;
-    const kind = cmd === 'SUPER_CHAT_MESSAGE' ? 'sc' : (cmd === 'GUARD_BUY' || cmd === 'USER_TOAST_MSG_V2' ? 'guard' : 'gift');
-    let text = '';
-    if (kind === 'sc') {
-      text = data.message || '超级留言';
-    } else if (kind === 'guard') {
-      text = '开通  ' + (gift.giftName || '大航海') + (Number(gift.num) > 1 ? ' × ' + gift.num : '');
-    } else {
-      text = '赠送  ' + (gift.giftName || '礼物') + ' × ' + (Number(gift.num) || 1);
-    }
-    return {
-      type: kind === 'sc' ? 'sc' : 'gift',
-      kind,
-      uid,
-      uname: gift.uname || userInfo.uname || senderBase.name || '匿名用户',
-      avatarUrl: window.DanmuAvatars ? window.DanmuAvatars.extractEventAvatar(obj) : '',
-      text,
-      role,
-      medal: medal.medal_name ? String(medal.medal_name) + ' ' + (Number(medal.medal_level) || 0) : '',
-      valueYuan
-    };
-  }
-
-  function onRaw(obj) {
-    const cmd = String(obj.cmd || '').split(':')[0];
-    if (cmd === 'DANMU_MSG') {
-      addMessage(parseDanmaku(obj));
-      return;
-    }
-    const extractor = window.BiliLive && window.BiliLive._test && window.BiliLive._test.extractGift;
-    if (!extractor) return;
-    const gift = extractor(obj);
-    if (gift) addMessage(giftContext(obj, gift));
-  }
-
-  function reportStatus(status) {
-    if (!isObsMode && desktopApi) desktopApi.reportStatus(status);
-  }
-
-  function ensureClient() {
-    if (isObsMode) return;
-    if (client) return;
-    client = window.BiliLive.createClient();
-    client.onStatus(reportStatus);
-    client.onRawCommand(onRaw);
-  }
-
-  async function loadRoomEmotes(roomId, generation) {
-    try {
-      const response = await fetch('/api/room_emotes?roomId=' + encodeURIComponent(roomId));
-      const result = await response.json();
-      if (generation !== connectGeneration) return;
-      roomEmoteAliases = result && result.ok
-        ? window.DanmuEmotes.buildRoomEmoteAliases(result.emotes)
-        : {};
-    } catch (e) {
-      if (generation === connectGeneration) roomEmoteAliases = {};
-    }
-  }
-
-  async function connectRoom(roomId) {
-    if (isObsMode) return;
-    const normalized = String(roomId || '').trim();
-    const generation = ++connectGeneration;
-    if (!/^\d+$/.test(normalized)) {
-      connectedRoomId = '';
-      ownerUid = 0;
-      roomEmoteAliases = {};
-      if (client) client.disconnect();
-      reportStatus('disconnected');
-      return;
-    }
-
-    let resolvedRoomId = normalized;
-    roomEmoteAliases = {};
-    try {
-      const response = await fetch('/api/room_info?roomId=' + encodeURIComponent(normalized));
-      const result = await response.json();
-      if (generation !== connectGeneration) return;
-      ownerUid = result && result.ok ? Number(result.ownerUid) || 0 : 0;
-      if (result && result.ok && /^\d+$/.test(String(result.roomId || ''))) {
-        resolvedRoomId = String(result.roomId);
+      if (!keep.has(id)) {
+        forgetPixelRow(row);
+        row.remove();
       }
-    } catch (e) {
-      if (generation !== connectGeneration) return;
-      ownerUid = 0;
-    }
+    });
+    // Keep unchanged cards (and their canvases / swipe state) in place.
+    orderedRows.forEach((rows, target) => {
+      let next = target.firstElementChild;
+      rows.forEach((row) => {
+        if (row === next) next = next.nextElementSibling;
+        else target.insertBefore(row, next);
+      });
+    });
+    updateEmptyState();
+    pruneMessages();
+    if (Number.isFinite(revision)) renderedSceneRevision = revision;
+    scheduleMessageRender();
+  }
 
-    loadRoomEmotes(resolvedRoomId, generation);
-
-    if (client && connectedRoomId && connectedRoomId !== normalized) {
-      client.disconnect();
-      client = null;
-    }
-    ensureClient();
-    connectedRoomId = normalized;
-    client.connect(normalized);
+  function clearDisplayedScene(revision) {
+    if (messageRenderFrame !== null) cancelAnimationFrame(messageRenderFrame);
+    messageRenderFrame = null;
+    pendingPixelRows.clear();
+    redrawAllPixelRows = false;
+    els.messageStack.querySelectorAll('.message-row').forEach((row) => {
+      forgetPixelRow(row);
+      row.remove();
+    });
+    updateEmptyState();
+    // IPC clear can beat an older SSE event already on its way to the preview.
+    // Keep the main process's revision so that old scene cannot flash back.
+    renderedSceneRevision = Number.isFinite(Number(revision))
+      ? Math.max(renderedSceneRevision, Number(revision))
+      : -1;
   }
 
   function applySettings(next) {
-    const previousRoom = settings.roomId;
     settings = Object.assign(settings, next || {});
     if (!isObsMode) {
       // The desktop viewport is the canonical live canvas. Saved dimensions
@@ -703,11 +560,8 @@
     settings.themeConfigs = normalizeThemeConfigs(settings.themeConfigs);
     document.body.dataset.theme = settings.theme;
     document.body.classList.toggle('size-locked', settings.overlaySizeLocked === true);
+    updatePixelMode();
     applyResponsiveTheme();
-    if (settings.theme === 'pixel') schedulePixelRender();
-    if (!isObsMode && (String(settings.roomId || '') !== String(previousRoom || '') || String(settings.roomId || '') !== connectedRoomId)) {
-      connectRoom(settings.roomId);
-    }
   }
 
   function applyOutputState(state) {
@@ -717,29 +571,13 @@
       setCanvasSize(width, height);
     }
     applySettings(state && state.settings ? state.settings : {});
-    if (isObsMode && state && state.scene) renderSceneSnapshot(state.scene);
-  }
-
-  function addPreviewMessages() {
-    const samples = [
-      { type: 'chat', uname: '神绮爱', role: 'host', medal: '', text: '今晚的声音刚刚好' },
-      { type: 'chat', uname: '小透明', role: 'manager', medal: '', text: '连接状态正常，弹幕已同步' },
-      { type: 'chat', uname: '赤焰之心', role: 'governor', medal: '陪伴 18', text: '继续加油，期待更多精彩！' },
-      { type: 'chat', uname: '紫电青霜', role: 'admiral', medal: '陪伴 12', text: '一起陪伴主播成长！' },
-      { type: 'chat', uname: '晨曦之光', role: 'captain', medal: '陪伴 6', text: '舰长来啦，支持神绮爱！' },
-      { type: 'chat', uname: '星河入梦', role: 'viewer', medal: '', text: '这套界面看着很舒服' },
-      { type: 'gift', kind: 'gift', uname: '云水之间', role: 'viewer', medal: '', text: '赠送  小花花 × 10', valueYuan: 30 },
-      { type: 'sc', kind: 'sc', uname: '晚风与你', role: 'captain', medal: '', text: '求配置和键位分享～', valueYuan: 50 }
-    ];
-    const gaps = [451, 385, 12000, 24000, 24000, 36000, 50000, 70000];
-    samples.forEach((sample, index) => addMessage(sample, gaps[index]));
+    if (state && state.scene) renderSceneSnapshot(state.scene);
   }
 
   function renderPixelEmote(image) {
     if (!image || !image.complete || !image.naturalWidth) return;
     const visual = image.closest('.emote-visual');
-    const canvas = visual && visual.querySelector('.emote-pixel-canvas');
-    if (!visual || !canvas) return;
+    if (!visual) return;
     const width = Math.max(1, Math.round(image.offsetWidth));
     const height = Math.max(1, Math.round(image.offsetHeight));
     if (width < 2 || height < 2) return;
@@ -761,8 +599,18 @@
       pixels = sourceContext.getImageData(0, 0, columns, rows).data;
     } catch (e) {
       return;
+    } finally {
+      source.width = 0;
+      source.height = 0;
     }
 
+    let canvas = visual.querySelector('.emote-pixel-canvas');
+    if (!canvas) {
+      canvas = document.createElement('canvas');
+      canvas.className = 'emote-pixel-canvas';
+      canvas.setAttribute('aria-hidden', 'true');
+      visual.appendChild(canvas);
+    }
     canvas.width = targetWidth;
     canvas.height = targetHeight;
     canvas.style.width = width + 'px';
@@ -828,25 +676,180 @@
   }
 
   function renderPixelRow(row) {
+    if (!row.isConnected) return;
     if (bitmapPixelFont) {
       row.querySelectorAll('.pixel-source').forEach((element) => {
         window.BitmapPixelFont.render(element, bitmapPixelFont, currentThemeConfig().bodyColor);
       });
     }
     row.querySelectorAll('.emote-image').forEach(renderPixelEmote);
+    row.classList.toggle('pixel-rendered', !!bitmapPixelFont);
   }
 
-  function renderAllPixelRows() {
+  function loadPixelFontScript() {
+    if (window.BitmapPixelFont) return Promise.resolve();
+    if (pixelFontScriptLoad) return pixelFontScriptLoad;
+    pixelFontScriptLoad = new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = '../js/pixel-font.js';
+      script.onload = () => window.BitmapPixelFont ? resolve() : reject(new Error('pixel font script unavailable'));
+      script.onerror = () => {
+        script.remove();
+        reject(new Error('pixel font script could not load'));
+      };
+      document.head.appendChild(script);
+    }).catch((error) => {
+      pixelFontScriptLoad = null;
+      throw error;
+    });
+    return pixelFontScriptLoad;
+  }
+
+  function ensureBitmapPixelFont() {
+    if (bitmapPixelFontLoad) return;
+    bitmapPixelFontLoad = loadPixelFontScript().then(() => (
+      window.BitmapPixelFont.load('/desktop/fonts/unifont-16px.fpb.gz')
+    )).then((font) => {
+      bitmapPixelFont = font;
+      if (settings.theme === 'pixel') {
+        document.body.classList.add('pixel-font-ready');
+        scheduleMessageRender(null, true);
+      }
+    }).catch(() => {
+      bitmapPixelFontLoad = null;
+      bitmapPixelFont = null;
+      document.body.classList.remove('pixel-font-ready');
+    });
+  }
+
+  function releasePixelCanvases(row) {
+    // Zero the backing stores before removing nodes so GPU/bitmap storage need
+    // not wait for detached DOM nodes to be garbage-collected.
+    row.querySelectorAll('.pixel-canvas, .emote-pixel-canvas').forEach((canvas) => {
+      canvas.width = 0;
+      canvas.height = 0;
+      canvas.remove();
+    });
+    row.classList.remove('pixel-rendered');
+  }
+
+  function forgetPixelRow(row) {
+    pendingPixelRows.delete(row);
+    visiblePixelRows.delete(row);
+    if (pixelObservedRows.delete(row)) {
+      if (pixelIntersectionObserver) pixelIntersectionObserver.unobserve(row);
+      if (pixelResizeObserver) pixelResizeObserver.unobserve(row);
+      pixelRowSizes.delete(row);
+      releasePixelCanvases(row);
+    }
+  }
+
+  function updatePixelMode() {
+    if (settings.theme !== 'pixel') {
+      if (!pixelModeActive) return;
+      pixelModeActive = false;
+      if (pixelIntersectionObserver) pixelIntersectionObserver.disconnect();
+      if (pixelResizeObserver) pixelResizeObserver.disconnect();
+      pixelIntersectionObserver = null;
+      pixelResizeObserver = null;
+      if (messageRenderFrame !== null) cancelAnimationFrame(messageRenderFrame);
+      messageRenderFrame = null;
+      pendingPixelRows.clear();
+      redrawAllPixelRows = false;
+      pixelObservedRows.forEach((row) => {
+        releasePixelCanvases(row);
+        pixelRowSizes.delete(row);
+        // The bitmap's Latin-name sizing must not leak into another skin.
+        row.querySelectorAll('.user-name').forEach((name) => {
+          name.style.removeProperty('min-width');
+          name.style.removeProperty('flex');
+        });
+      });
+      pixelObservedRows.clear();
+      visiblePixelRows.clear();
+      document.body.classList.remove('pixel-font-ready');
+      return;
+    }
+    if (!pixelModeActive) {
+      pixelModeActive = true;
+      // No observers or geometry scans exist until the pixel skin is selected.
+      // IntersectionObserver follows clipping and entrance/swipe transforms;
+      // ResizeObserver handles wrapping and SC consuming the normal chat area.
+      pixelIntersectionObserver = new IntersectionObserver(() => scheduleMessageRender());
+      pixelResizeObserver = new ResizeObserver((entries) => {
+        entries.forEach((entry) => {
+          if (!pixelObservedRows.has(entry.target)) return;
+          const previous = pixelRowSizes.get(entry.target);
+          const size = entry.contentRect;
+          if (previous && (previous.width !== size.width || previous.height !== size.height)) {
+            pendingPixelRows.add(entry.target);
+          }
+          pixelRowSizes.set(entry.target, { width: size.width, height: size.height });
+        });
+        scheduleMessageRender();
+      });
+      [els.overlayStage, els.messageStack, els.messageList, els.pinnedScStack].forEach((element) => {
+        pixelResizeObserver.observe(element);
+      });
+    }
+    document.body.classList.toggle('pixel-font-ready', !!bitmapPixelFont);
+    ensureBitmapPixelFont();
+  }
+
+  function intersectRects(a, b) {
+    return {
+      left: Math.max(a.left, b.left), top: Math.max(a.top, b.top),
+      right: Math.min(a.right, b.right), bottom: Math.min(a.bottom, b.bottom)
+    };
+  }
+
+  function renderVisiblePixelRows() {
+    const rows = Array.from(els.messageStack.querySelectorAll('.message-row'));
+    const viewport = { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight };
+    const stageClip = intersectRects(viewport, els.overlayStage.getBoundingClientRect());
+    const stackClip = intersectRects(stageClip, els.messageStack.getBoundingClientRect());
+    const clips = new Map([
+      [els.messageList, intersectRects(stackClip, els.messageList.getBoundingClientRect())],
+      [els.pinnedScStack, intersectRects(stackClip, els.pinnedScStack.getBoundingClientRect())]
+    ]);
+    const nextVisible = new Set();
+    // Read geometry together before allocating/releasing/drawing canvases.
+    // getBoundingClientRect includes OBS's stage transform, unlike offsetTop.
+    rows.forEach((row) => {
+      if (!pixelObservedRows.has(row)) {
+        pixelObservedRows.add(row);
+        pixelIntersectionObserver.observe(row);
+        pixelResizeObserver.observe(row);
+      }
+      const clip = clips.get(row.parentElement);
+      const rect = intersectRects(clip, row.getBoundingClientRect());
+      if (rect.right > rect.left && rect.bottom > rect.top) nextVisible.add(row);
+    });
+    visiblePixelRows.forEach((row) => {
+      if (!nextVisible.has(row)) releasePixelCanvases(row);
+    });
+    const redrawAll = redrawAllPixelRows;
+    const dirty = new Set(pendingPixelRows);
+    pendingPixelRows.clear();
+    redrawAllPixelRows = false;
+    nextVisible.forEach((row) => {
+      // A moved, unchanged DOM card has no dirty flag. Entering the clipped
+      // viewport must still redraw it after its offscreen canvas was released.
+      if (redrawAll || dirty.has(row) || !visiblePixelRows.has(row)) renderPixelRow(row);
+    });
+    visiblePixelRows.clear();
+    nextVisible.forEach((row) => visiblePixelRows.add(row));
+  }
+
+  function scheduleMessageRender(row, redrawAll) {
     if (settings.theme !== 'pixel') return;
-    els.messageStack.querySelectorAll('.message-row').forEach(renderPixelRow);
-  }
-
-  function schedulePixelRender() {
-    if (pixelRenderTimer) clearTimeout(pixelRenderTimer);
-    pixelRenderTimer = setTimeout(() => {
-      pixelRenderTimer = null;
-      requestAnimationFrame(renderAllPixelRows);
-    }, 60);
+    if (row) pendingPixelRows.add(row);
+    if (redrawAll) redrawAllPixelRows = true;
+    if (messageRenderFrame !== null) return;
+    messageRenderFrame = requestAnimationFrame(() => {
+      messageRenderFrame = null;
+      if (settings.theme === 'pixel') renderVisiblePixelRows();
+    });
   }
 
   function showUnlockToast(clickThrough) {
@@ -934,6 +937,7 @@
   }
 
   async function init() {
+    els.overlayStage = document.getElementById('overlayStage');
     els.messageStack = document.getElementById('messageStack');
     els.pinnedScStack = document.getElementById('pinnedScStack');
     els.messageList = document.getElementById('messageList');
@@ -962,33 +966,31 @@
         applyOutputState({});
       }
     }
-    window.BitmapPixelFont.load('/desktop/fonts/unifont-16px.fpb.gz').then((font) => {
-      bitmapPixelFont = font;
-      document.body.classList.add('pixel-font-ready');
-      if (settings.theme === 'pixel') requestAnimationFrame(renderAllPixelRows);
-    }).catch(() => {
-      bitmapPixelFont = null;
-      document.body.classList.remove('pixel-font-ready');
-    });
+    if (document.fonts) {
+      document.fonts.addEventListener('loadingdone', () => scheduleMessageRender(null, true));
+    }
     if (desktopApi) {
       desktopApi.onSettingsChanged(applySettings);
-      desktopApi.onPreviewMessages(addPreviewMessages);
       desktopApi.onSceneCleared(clearDisplayedScene);
       desktopApi.onClickThroughChanged(showUnlockToast);
-    } else {
-      const events = new EventSource('/api/desktop-output-events');
+    }
+    // The main process owns room reception and scene history even with no
+    // desktop windows. Preview and OBS consume that same revisioned stream.
+    const events = new EventSource('/api/desktop-output-events');
+    if (isObsMode) {
       events.addEventListener('settings', (event) => {
         try {
           const state = JSON.parse(event.data);
           applyOutputState(state);
         } catch (e) {}
       });
-      events.addEventListener('scene', (event) => {
-        try {
-          renderSceneSnapshot(JSON.parse(event.data));
-        } catch (e) {}
-      });
     }
+    events.addEventListener('scene', (event) => {
+      try {
+        renderSceneSnapshot(JSON.parse(event.data));
+      } catch (e) {}
+    });
+    window.addEventListener('pagehide', () => events.close(), { once: true });
     window.addEventListener('resize', () => {
       if (isObsMode) applyStageFit();
       else {
@@ -996,7 +998,6 @@
         reportPreviewViewport();
       }
       applyResponsiveTheme();
-      schedulePixelRender();
     });
     bindResizeHandle();
     if (desktopApi) {
