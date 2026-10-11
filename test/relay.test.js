@@ -121,6 +121,7 @@ function unmaskedFrame(payload, opcode, fin) {
 {
   assert.strictEqual(isReplayableCommand({ cmd: 'DANMU_MSG:4:0:2:2:2:0' }), true);
   assert.strictEqual(isReplayableCommand({ cmd: 'SEND_GIFT' }), true);
+  assert.strictEqual(isReplayableCommand({ cmd: 'SEND_GIFT_V2:0:0' }), true);
   assert.strictEqual(isReplayableCommand({ cmd: 'ONLINE_RANK_COUNT' }), false);
   ok('only visible chat commands are replayable');
 }
@@ -132,9 +133,68 @@ function unmaskedFrame(payload, opcode, fin) {
   history.add({ cmd: 'SEND_GIFT', data: { giftName: 'flower' } });
   history.add({ cmd: 'SUPER_CHAT_MESSAGE', data: { message: 'third' } });
   assert.deepStrictEqual(history.snapshot().map((item) => item.cmd), ['SEND_GIFT', 'SUPER_CHAT_MESSAGE']);
+  history.add({ cmd: 'SEND_GIFT_V2', data: { pb: 'AQ==' } });
+  assert.deepStrictEqual(history.snapshot().map((item) => item.cmd), ['SUPER_CHAT_MESSAGE', 'SEND_GIFT_V2']);
   history.clear();
   assert.deepStrictEqual(history.snapshot(), []);
   ok('visible command history is bounded and clearable');
+}
+
+{
+  const history = createCommandHistory(4);
+  history.add({ cmd: 'SUPER_CHAT_MESSAGE', data: { id: 12, message: 'original' } });
+  history.add({ cmd: 'SUPER_CHAT_MESSAGE:4:0', data: { id: '0012', message: 'updated' } });
+  history.add({ cmd: 'SUPER_CHAT_MESSAGE', data: { id: 13, message: 'different' } });
+  assert.deepStrictEqual(history.snapshot().map(item => item.data.message), ['updated', 'different']);
+  history.add({ cmd: 'SUPER_CHAT_MESSAGE_DELETE', data: { ids: [12, '13'] } });
+  history.add({ cmd: 'SUPER_CHAT_MESSAGE', data: { id: 12, message: 'late repeat' } });
+  assert.deepStrictEqual(history.snapshot(), []);
+  history.clear(); history.add({ cmd: 'SUPER_CHAT_MESSAGE', data: { id: 12, message: 'new room' } });
+  assert.strictEqual(history.snapshot().length, 1);
+  ok('legacy replay neither duplicates repeated SC IDs nor resurrects already-deleted messages');
+}
+
+{
+  const { EventEmitter } = require('events');
+  const server = new EventEmitter(); let roomRequests = 0;
+  const relay = require('../relay.js').createRelay(server, {
+    getUserInfo: async () => null, getCookies: () => ({}),
+    roomInfoFetcher: async () => { roomRequests++; return { ok: false }; },
+    danmuInfoFetcher: async () => ({ ok: false })
+  });
+  const makeSocket = () => Object.assign(new EventEmitter(), {
+    destroyed: false, writes: [], write(value) { this.writes.push(value); },
+    destroy() { this.destroyed = true; this.emit('close'); }
+  });
+  const foreign = makeSocket();
+  server.emit('upgrade', { url: '/relay?room=123', headers: { origin: 'https://example.invalid', host: '127.0.0.1:3000', 'sec-websocket-key': 'test' } }, foreign);
+  assert.equal(foreign.destroyed, true); assert.equal(roomRequests, 0); assert.equal(foreign.writes.length, 0);
+  const local = makeSocket();
+  server.emit('upgrade', { url: '/relay', headers: { origin: 'http://127.0.0.1:3000', host: '127.0.0.1:3000', 'sec-websocket-key': 'test' } }, local);
+  assert.equal(local.destroyed, false); assert.ok(local.writes.length >= 2);
+  relay.shutDown();
+  ok('foreign web pages cannot change the room through a local WebSocket');
+}
+
+{
+  const history = createCommandHistory(48, 300);
+  const item = id => ({ cmd: 'DANMU_MSG', info: [[], String(id) + 'x'.repeat(80)] });
+  history.add(item(1)); history.add(item(2));
+  const before = history.snapshot();
+  history.add({ cmd: 'DANMU_MSG', info: [[], 'x'.repeat(500)] });
+  assert.deepEqual(history.snapshot(), before, 'one oversized command must not flush otherwise useful replay');
+  for (let id = 3; id <= 1000; id++) history.add(item(id));
+  assert.ok(history.getStats().bytes <= 300);
+  assert.equal(history.getStats().bytes, history.snapshot().reduce((bytes, value) => bytes + Buffer.byteLength(JSON.stringify(value)), 0));
+  assert.equal(history.snapshot().at(-1).info[1], item(1000).info[1], 'normal replay recovers after rejection and repeated eviction');
+  history.clear(); assert.deepEqual(history.getStats(), { size: 0, bytes: 0 });
+  history.add({ cmd: 'SUPER_CHAT_MESSAGE', data: { id: 1, message: 'original' } });
+  history.add({ cmd: 'SUPER_CHAT_MESSAGE', data: { id: '1', message: 'updated content' } });
+  assert.equal(history.getStats().size, 1);
+  assert.equal(history.getStats().bytes, Buffer.byteLength(JSON.stringify(history.snapshot()[0])));
+  history.add({ cmd: 'SUPER_CHAT_MESSAGE_DELETE', data: { ids: [1] } });
+  assert.deepEqual(history.getStats(), { size: 0, bytes: 0 });
+  ok('replay byte budget bounds retained data and recovers after oversized packets, SC correction and deletion');
 }
 
 console.log('全部通过: ' + passed + ' 项');

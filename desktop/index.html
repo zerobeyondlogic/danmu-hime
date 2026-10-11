@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-control-theme="dark">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -17,6 +17,7 @@
       <span class="window-kind">CONTROL</span>
     </div>
     <div class="window-actions">
+      <button id="programSettingsButton" class="program-settings-button" type="button" aria-label="程序设置" title="程序设置" aria-haspopup="dialog" aria-controls="programSettingsDialog" aria-expanded="false"><i aria-hidden="true"></i></button>
       <button id="minimizeButton" type="button" aria-label="最小化">—</button>
       <button id="closeButton" class="close" type="button" aria-label="关闭">×</button>
     </div>
@@ -29,9 +30,12 @@
         <h1>弹幕输出控制台</h1>
         <p>设置窗口不会出现在 OBS 输出中。</p>
       </div>
-      <div class="status-card" id="statusCard" data-status="disconnected">
-        <i></i>
-        <span id="statusText">未连接</span>
+      <div class="status-group">
+        <div class="status-card" id="statusCard" data-status="disconnected">
+          <i></i>
+          <span id="statusText">未连接</span>
+        </div>
+        <small id="playbackStatus" class="playback-status hidden" role="status" aria-live="polite" aria-atomic="true"></small>
       </div>
     </section>
 
@@ -59,35 +63,90 @@
       <button id="logoutButton" class="account-button hidden" type="button">退出登录</button>
     </section>
 
-    <section class="control-section obs-section">
+    <section id="desktopOutputSection" class="control-section desktop-output-section" aria-labelledby="desktopOutputTitle">
       <div class="section-label">
-        <span>OBS 镜像输出</span>
-        <small id="obsMirrorSizeText">当前镜像尺寸跟随桌面预览</small>
+        <span id="desktopOutputTitle">桌面输出窗口</span>
+        <small id="previewStateText" class="preview-state" data-enabled="true">正在显示</small>
       </div>
-      <div class="obs-url-line">
-        <input id="obsUrlInput" type="text" readonly aria-label="OBS 浏览器源地址">
-        <button id="copyObsUrlButton" type="button">复制地址</button>
+      <div class="output-actions" role="group" aria-label="桌面窗口快捷操作">
+        <button id="previewToggleButton" class="action-button active" type="button" aria-pressed="true">
+          <span id="previewToggleLabel">关闭输出窗口</span><small id="previewToggleHint">桌面窗口正在显示</small>
+        </button>
+        <button id="clickThroughButton" class="action-button" type="button" aria-pressed="false">
+          <span>鼠标穿透</span><small>Ctrl + Shift + F10 随时解锁</small>
+        </button>
       </div>
-      <small class="obs-help">OBS 页面会自动按比例显示桌面预览；浏览器源填相同宽高可获得 1:1 清晰度。</small>
+      <div class="output-preferences">
+        <label class="toggle-line">
+          <span><b>始终置顶</b><small>显示在其他窗口之上</small></span>
+          <input id="alwaysOnTopInput" type="checkbox" checked>
+        </label>
+        <label class="toggle-line">
+          <span><b>锁定窗口尺寸</b><small>防止误拉伸，仍可移动</small></span>
+          <input id="overlaySizeLockedInput" type="checkbox">
+        </label>
+      </div>
+      <div class="dimension-field">
+        <div class="dimension-heading">
+          <span>窗口尺寸</span>
+          <small>也可拖动窗口边缘调整</small>
+        </div>
+        <div class="dimension-line">
+          <label><span>W</span><input id="overlayWidthInput" type="number" min="240" max="7680" step="1" value="515" aria-label="输出窗口宽度"></label>
+          <i>×</i>
+          <label><span>H</span><input id="overlayHeightInput" type="number" min="160" max="2160" step="1" value="650" aria-label="输出窗口高度"></label>
+          <button id="applyOverlaySizeButton" type="button">应用</button>
+        </div>
+      </div>
     </section>
 
     <section class="control-section">
       <div class="section-label">
         <span>弹幕皮肤</span>
-        <small>实时同步到透明输出窗口</small>
+        <small>同步到桌面窗口与 OBS</small>
       </div>
-      <div class="theme-grid" role="group" aria-label="弹幕皮肤">
+      <div id="themeGrid" class="theme-grid is-collapsed" role="group" aria-label="弹幕皮肤">
         <div class="theme-option" data-theme-option="glass">
           <button class="theme-choice" type="button" data-theme-choice="glass">
             <i class="theme-swatch glass"></i><span><b>轻雾玻璃</b><small>冷调、克制、局部磨砂</small></span>
           </button>
           <button class="theme-settings-button" type="button" data-theme-settings="glass" aria-label="设置轻雾玻璃"><i aria-hidden="true"></i></button>
         </div>
-        <div class="theme-option" data-theme-option="pixel">
-          <button class="theme-choice" type="button" data-theme-choice="pixel">
-            <i class="theme-swatch pixel"></i><span><b>单色点阵</b><small>仅显示点亮的琥珀像素</small></span>
+        <div class="theme-option" data-theme-option="portrait">
+          <button class="theme-choice" type="button" data-theme-choice="portrait">
+            <i class="theme-swatch portrait"></i><span><b>映像柔焦</b><small>头像与礼物、柔焦成景</small></span>
           </button>
-          <button class="theme-settings-button" type="button" data-theme-settings="pixel" aria-label="设置单色点阵"><i aria-hidden="true"></i></button>
+          <button class="theme-settings-button" type="button" data-theme-settings="portrait" aria-label="设置映像柔焦"><i aria-hidden="true"></i></button>
+        </div>
+        <div class="theme-option" data-theme-option="mecha">
+          <button class="theme-choice" type="button" data-theme-choice="mecha">
+            <i class="theme-swatch mecha"></i><span><b>机甲装甲</b><small>海军蓝装甲、警示黄切角</small></span>
+          </button>
+          <button class="theme-settings-button" type="button" data-theme-settings="mecha" aria-label="设置机甲装甲"><i aria-hidden="true"></i></button>
+        </div>
+        <div class="theme-option" data-theme-option="comic">
+          <button class="theme-choice" type="button" data-theme-choice="comic">
+            <i class="theme-swatch comic"></i><span><b>彩色漫画</b><small>彩色分镜、鲜明墨线</small></span>
+          </button>
+          <button class="theme-settings-button" type="button" data-theme-settings="comic" aria-label="设置彩色漫画"><i aria-hidden="true"></i></button>
+        </div>
+        <div class="theme-option" data-theme-option="manga">
+          <button class="theme-choice" type="button" data-theme-choice="manga">
+            <i class="theme-swatch manga"></i><span><b>黑白手绘</b><small>细线圆角对白、曲线气泡尾</small></span>
+          </button>
+          <button class="theme-settings-button" type="button" data-theme-settings="manga" aria-label="设置黑白手绘"><i aria-hidden="true"></i></button>
+        </div>
+        <div class="theme-option" data-theme-option="win95">
+          <button class="theme-choice" type="button" data-theme-choice="win95">
+            <i class="theme-swatch win95"></i><span><b>Windows 95</b><small>经典蓝标题、灰色立体边框</small></span>
+          </button>
+          <button class="theme-settings-button" type="button" data-theme-settings="win95" aria-label="设置 Windows 95"><i aria-hidden="true"></i></button>
+        </div>
+        <div class="theme-option" data-theme-option="el">
+          <button class="theme-choice" type="button" data-theme-choice="el">
+            <i class="theme-swatch el"></i><span><b>琥珀 EL</b><small>近黑底、细腻琥珀微光</small></span>
+          </button>
+          <button class="theme-settings-button" type="button" data-theme-settings="el" aria-label="设置琥珀 EL"><i aria-hidden="true"></i></button>
         </div>
         <div class="theme-option" data-theme-option="tui">
           <button class="theme-choice" type="button" data-theme-choice="tui">
@@ -95,57 +154,90 @@
           </button>
           <button class="theme-settings-button" type="button" data-theme-settings="tui" aria-label="设置 OpenCode TUI"><i aria-hidden="true"></i></button>
         </div>
-        <div class="theme-option" data-theme-option="risograph">
-          <button class="theme-choice" type="button" data-theme-choice="risograph">
-            <i class="theme-swatch risograph"></i><span><b>Risograph</b><small>双色套印、网点与缺墨</small></span>
+        <div class="theme-option" data-theme-option="outline">
+          <button class="theme-choice" type="button" data-theme-choice="outline">
+            <i class="theme-swatch outline"></i><span><b>轻线描边</b><small>通透画布、柔和细线卡片</small></span>
           </button>
-          <button class="theme-settings-button" type="button" data-theme-settings="risograph" aria-label="设置 Risograph"><i aria-hidden="true"></i></button>
+          <button class="theme-settings-button" type="button" data-theme-settings="outline" aria-label="设置轻线描边"><i aria-hidden="true"></i></button>
         </div>
+      </div>
+      <div class="theme-disclosure-line">
+        <small id="currentHiddenThemeHint" class="theme-current-hint hidden" role="status" aria-live="polite"></small>
+        <button id="themeListToggleButton" class="theme-list-toggle" type="button" aria-controls="themeGrid" aria-expanded="false" aria-label="展开其余 7 套皮肤" title="展开其余 7 套皮肤">
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m4 6 8 6 8-6m-16 6 8 6 8-6"/></svg>
+        </button>
       </div>
     </section>
 
-    <section class="control-section compact-section">
-      <div class="dimension-field">
-        <div class="dimension-heading">
-          <span>主播预览窗口尺寸</span>
-          <small>唯一尺寸基准，可直接拖动窗口边缘</small>
-        </div>
-        <div class="dimension-line">
-          <label><span>W</span><input id="overlayWidthInput" type="number" min="240" max="7680" step="1" value="450" aria-label="输出窗口宽度"></label>
-          <i>×</i>
-          <label><span>H</span><input id="overlayHeightInput" type="number" min="160" max="2160" step="1" value="650" aria-label="输出窗口高度"></label>
-          <button id="applyOverlaySizeButton" type="button">应用</button>
-        </div>
+    <section class="control-section style-preset-section" aria-labelledby="stylePresetSectionTitle">
+      <div class="section-label">
+        <span id="stylePresetSectionTitle">样式预设</span>
+        <small>保存在本机</small>
       </div>
-      <label class="toggle-line">
-        <span><b>锁定输出窗口尺寸</b><small>锁定后仍可拖动位置，避免误拉伸</small></span>
-        <input id="overlaySizeLockedInput" type="checkbox">
-      </label>
-      <label class="toggle-line">
-        <span><b>显示主播桌面预览</b><small>关闭后 OBS 输出仍继续工作</small></span>
-        <input id="previewEnabledInput" type="checkbox" checked>
-      </label>
-      <label class="toggle-line">
-        <span><b>输出窗口始终置顶</b><small>保持在游戏及普通窗口上方</small></span>
-        <input id="alwaysOnTopInput" type="checkbox" checked>
-      </label>
+      <div class="style-preset-select-line">
+        <select id="stylePresetSelect" aria-label="选择样式预设" aria-describedby="stylePresetHint">
+          <button type="button" tabindex="-1"><selectedcontent></selectedcontent></button>
+          <option value="">未选择预设</option>
+        </select>
+        <button id="applyStylePresetButton" class="style-preset-button primary" type="button" disabled>应用</button>
+      </div>
+      <div class="style-preset-actions">
+        <button id="saveStylePresetButton" class="style-preset-button" type="button">保存当前</button>
+        <button id="manageStylePresetButton" class="style-preset-button" type="button" disabled>管理</button>
+      </div>
+      <small id="stylePresetHint" class="style-preset-hint" role="status" aria-live="polite">保存当前皮肤、尺寸与配色。</small>
     </section>
 
-    <section class="output-actions">
-      <button id="clickThroughButton" class="action-button" type="button">
-        <span>鼠标穿透</span><small>Ctrl + Shift + F10 随时解锁</small>
-      </button>
-      <button id="showOverlayButton" class="action-button" type="button">
-        <span>定位输出窗口</span><small>解除穿透并聚焦透明窗口</small>
-      </button>
-      <button id="resetOverlayButton" class="quiet-button" type="button">重置输出窗口位置</button>
-      <button id="testMessageButton" class="quiet-button" type="button">发送四套预览内容</button>
+    <section class="control-section obs-section">
+      <div class="section-label">
+        <span>OBS 镜像输出</span>
+        <small id="obsMirrorSizeText">镜像尺寸跟随输出窗口</small>
+      </div>
+      <div class="obs-url-line">
+        <input id="obsUrlInput" type="text" readonly aria-label="OBS 浏览器源地址">
+        <button id="copyObsUrlButton" type="button">复制地址</button>
+      </div>
+      <small class="obs-help">在 OBS 中添加浏览器源，粘贴此地址，并将宽高设为上方镜像尺寸。</small>
     </section>
+
   </main>
 </div>
 
+  <dialog id="programSettingsDialog" class="program-settings-dialog" aria-labelledby="programSettingsTitle">
+    <div class="program-settings-heading">
+      <h2 id="programSettingsTitle">程序设置</h2>
+      <button id="programSettingsCloseButton" class="program-settings-close" type="button" aria-label="关闭程序设置">×</button>
+    </div>
+    <div class="program-settings-content">
+      <div class="control-appearance-heading">
+        <span>主界面外观</span>
+        <small>仅影响控制台，不影响桌面弹幕或 OBS</small>
+      </div>
+      <div class="control-theme-switch" role="group" aria-label="主界面配色">
+        <button id="controlDarkButton" type="button" aria-pressed="true" disabled><i class="control-theme-dot dark" aria-hidden="true"></i>深色</button>
+        <button id="controlLightButton" type="button" aria-pressed="false" disabled><i class="control-theme-dot light" aria-hidden="true"></i>浅色</button>
+      </div>
+      <label class="control-opacity-field" for="controlOpacityInput">
+        <span>主界面不透明度<output id="controlOpacityValue" for="controlOpacityInput">97%</output></span>
+        <input id="controlOpacityInput" type="range" min="30" max="100" step="1" value="97" aria-describedby="controlAppearanceHint" disabled>
+      </label>
+      <small id="controlAppearanceHint" class="program-setting-hint" role="status" aria-live="polite">正在读取主界面外观设置…</small>
+    </div>
+    <div class="program-settings-content program-close-settings">
+      <label class="program-setting-line" for="closeActionSelect">
+        <span>关闭主窗口时</span>
+        <select id="closeActionSelect" aria-describedby="closeActionHint" disabled>
+          <option value="ask">每次询问</option>
+          <option value="tray">最小化到托盘</option>
+          <option value="quit">退出程序</option>
+        </select>
+      </label>
+      <small id="closeActionHint" class="program-setting-hint" role="status" aria-live="polite">可随时修改关闭方式。</small>
+    </div>
+  </dialog>
+
   <div id="qrDialog" class="qr-dialog hidden" role="dialog" aria-modal="true" aria-labelledby="qrTitle">
-    <button id="qrBackdrop" class="qr-backdrop" type="button" aria-label="关闭登录二维码"></button>
+    <button id="qrBackdrop" class="qr-backdrop" type="button" tabindex="-1" aria-label="关闭登录二维码"></button>
     <section class="qr-sheet">
       <div class="qr-heading">
         <div>
@@ -161,7 +253,7 @@
   </div>
 
   <div id="themeDialog" class="theme-dialog hidden" role="dialog" aria-modal="true" aria-labelledby="themeDialogTitle">
-    <button id="themeBackdrop" class="theme-backdrop" type="button" aria-label="关闭皮肤设置"></button>
+    <button id="themeBackdrop" class="theme-backdrop" type="button" tabindex="-1" aria-label="关闭皮肤设置"></button>
     <section class="theme-sheet">
       <div class="theme-sheet-heading">
         <div><span>THEME BASELINE</span><h2 id="themeDialogTitle">皮肤设置</h2></div>
@@ -170,23 +262,57 @@
       <p class="theme-help">当前输出窗口尺寸会成为新的响应式基准。</p>
       <label class="font-family-field"><span>字体名称</span><input id="fontFamilyInput" list="fontFamilyOptions" autocomplete="off" placeholder="输入本机已安装字体"></label>
       <datalist id="fontFamilyOptions">
+        <option value="YouYuan" label="幼圆（系统圆体）"></option>
+        <option value="ZCOOL KuaiLe" label="手写漫画"></option>
         <option value="Segoe UI Variable Text"></option><option value="Microsoft YaHei UI"></option>
         <option value="Cascadia Mono"></option><option value="KaiTi"></option><option value="SimHei"></option>
-        <option value="GNU Unifont 16 Bitmap"></option>
       </datalist>
       <div class="theme-control-list">
         <label><span>整体比例 <output id="themeScaleValue">100%</output></span><input id="themeScaleInput" type="range" min="60" max="140" step="1"></label>
         <label><span>弹幕垂直间距 <output id="messageGapValue">10px</output></span><input id="messageGapInput" type="range" min="0" max="20" step="1"></label>
+        <label class="horizontal-padding-control"><span>左右留白 <output id="horizontalPaddingValue">8px</output></span><small>距两侧边缘的距离；窄窗口会自动收紧</small><input id="horizontalPaddingInput" type="range" min="0" max="64" step="1" value="8"></label>
         <label><span>弹幕正文字号 <output id="messageFontValue">34px</output></span><input id="messageFontInput" type="range" min="16" max="48" step="1"></label>
+        <label class="emote-scale-control"><span>表情大小 <output id="emoteScaleValue">100%</output></span><small>独立缩放表情，文字字号保持当前设置</small><input id="emoteScaleInput" type="range" min="50" max="200" step="1" value="100"></label>
         <label><span>用户名字号 <output id="nameFontValue">20px</output></span><input id="nameFontInput" type="range" min="10" max="30" step="1"></label>
         <label><span>身份与礼物价值 <output id="metaFontValue">14px</output></span><input id="metaFontInput" type="range" min="8" max="24" step="1"></label>
         <label><span>时间字号 <output id="timeFontValue">12px</output></span><input id="timeFontInput" type="range" min="9" max="22" step="1"></label>
-        <label class="surface-opacity-control"><span>承载面不透明度 <output id="themeOpacityValue">68%</output></span><small>0% 仅保留弹幕 · 100% 显示完整皮肤背景</small><input id="themeOpacityInput" type="range" min="0" max="100" step="1"></label>
+        <label class="surface-opacity-control"><span><span id="surfaceOpacityLabel">承载面不透明度</span><output id="themeOpacityValue">68%</output></span><small id="surfaceOpacityHint">0% 仅保留弹幕 · 100% 显示完整皮肤背景</small><input id="themeOpacityInput" type="range" min="0" max="100" step="1"></label>
+        <label id="shadowStrengthField" class="shadow-strength-control hidden"><span>阴影强度 <output id="shadowStrengthValue">60%</output></span><small>0% 关闭阴影，数值越大阴影越明显</small><input id="shadowStrengthInput" type="range" min="0" max="100" step="1" value="60"></label>
+        <label id="glassSurfaceColorField" class="surface-color-control hidden"><span>承载面颜色<small>与不透明度共同决定底色效果</small></span><input id="surfaceColorInput" type="color" value="#000000"></label>
+        <label id="portraitWidthField" class="portrait-width-control hidden"><span>头像占比 <output id="portraitWidthValue">48%</output></span><small id="portraitWidthHint">占比越大，头像越大，上下裁切更多</small><input id="portraitWidthInput" type="range" min="30" max="70" step="1" value="48" aria-describedby="portraitWidthHint" disabled></label>
       </div>
       <label class="theme-avatar-toggle">
-        <span><b>显示用户头像</b><small>每套皮肤独立保存；关闭后保持极简布局</small></span>
+        <span><b id="themeAvatarLabel">显示用户头像</b><small id="themeAvatarHint">每套皮肤独立保存；关闭后保持极简布局</small></span>
         <input id="themeAvatarInput" type="checkbox">
       </label>
+      <label class="theme-avatar-toggle">
+        <span><b>仅显示完整卡片</b><small id="fullCardsOnlyHint">取消后顶部可显示部分消息，不影响置顶 SC</small></span>
+        <input id="fullCardsOnlyInput" type="checkbox" checked aria-describedby="fullCardsOnlyHint">
+      </label>
+      <label class="theme-avatar-toggle theme-alignment-field">
+        <span><b>弹幕对齐</b><small id="messageAlignHint">每套皮肤独立保存；保持消息顺序，置顶 SC 不变</small></span>
+        <select id="messageAlignInput" aria-describedby="messageAlignHint">
+          <option value="bottom">底部对齐</option>
+          <option value="top">顶部对齐</option>
+        </select>
+      </label>
+      <label class="theme-avatar-toggle theme-sc-toggle">
+        <span><b>SC永久置顶</b><small id="scNeverExpireHint" role="status" aria-live="polite">此皮肤独立保存；未勾选时到期进入弹幕流</small></span>
+        <input id="scNeverExpireInput" type="checkbox" aria-describedby="scNeverExpireHint">
+      </label>
+      <div class="theme-welcome-settings">
+        <label class="theme-avatar-toggle">
+          <span><b>进房欢迎</b><small>作为消息显示，随新弹幕向上滚动</small></span>
+          <input id="themeWelcomeInput" type="checkbox" checked>
+        </label>
+        <div class="theme-control-list">
+          <label class="welcome-font-control"><span>欢迎字号 <output id="welcomeFontValue">18px</output></span><input id="welcomeFontInput" type="range" min="12" max="48" step="1" value="18"></label>
+        </div>
+        <div class="theme-color-line theme-welcome-colors">
+          <label><span>提示文字</span><input id="welcomeTextColorInput" type="color"></label>
+          <label><span>昵称颜色</span><input id="welcomeNameColorInput" type="color"></label>
+        </div>
+      </div>
       <div class="theme-color-line">
         <label><span>正文颜色</span><input id="bodyColorInput" type="color"></label>
         <label><span>礼物颜色</span><input id="giftColorInput" type="color"></label>
@@ -205,29 +331,44 @@
     </section>
   </div>
 
+  <dialog id="stylePresetDialog" class="style-preset-dialog" aria-labelledby="stylePresetDialogTitle" aria-describedby="stylePresetDialogHelp stylePresetSummary">
+    <div class="style-preset-heading">
+      <h2 id="stylePresetDialogTitle">保存样式预设</h2>
+      <button id="stylePresetDialogCloseButton" class="style-preset-close" type="button" aria-label="关闭样式预设">×</button>
+    </div>
+    <p id="stylePresetDialogHelp" class="style-preset-help">保存当前皮肤、尺寸与配色，预设仅保存在本机。</p>
+    <label class="style-preset-name-field" for="stylePresetNameInput">
+      <span>预设名称</span>
+      <input id="stylePresetNameInput" type="text" maxlength="40" autocomplete="off" placeholder="例如：日常直播" autofocus>
+    </label>
+    <p id="stylePresetSummary" class="style-preset-summary" role="status" aria-live="polite"></p>
+    <div class="style-preset-dialog-actions">
+      <button id="confirmStylePresetButton" class="style-preset-button primary" type="button">保存</button>
+      <button id="overwriteStylePresetButton" class="style-preset-button hidden" type="button">用当前样式覆盖</button>
+      <button id="deleteStylePresetButton" class="style-preset-button danger hidden" type="button">删除</button>
+    </div>
+  </dialog>
+
   <dialog id="controlCloseDialog" class="control-close-dialog" aria-labelledby="controlCloseTitle" aria-describedby="controlCloseDescription">
     <div class="control-close-heading">
-      <span class="control-close-kicker">DANMU HIME</span>
-      <h2 id="controlCloseTitle">关闭控制台</h2>
-      <p id="controlCloseDescription">收起后，弹幕接收与 OBS 输出继续运行。</p>
+      <h2 id="controlCloseTitle">关闭弹幕姬</h2>
+      <button id="controlCloseCancelButton" class="control-close-cancel" type="button" aria-label="取消关闭">×</button>
     </div>
+    <p id="controlCloseDescription" class="control-close-description">最小化后继续接收弹幕，退出将停止输出。</p>
     <div id="controlCloseChoices" class="control-close-choices">
-      <button id="controlCloseTrayButton" class="control-close-option control-close-primary" type="button" autofocus>
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v10m-4-4 4 4 4-4M4 13v6a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6"/></svg>
-        <span><b>收起到托盘</b><small>弹幕接收、预览与 OBS 输出继续运行</small></span>
-        <span class="control-close-arrow" aria-hidden="true">→</span>
-      </button>
-      <button id="controlCloseQuitButton" class="control-close-option" type="button">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v9m-5.5-7a9 9 0 1 0 11 0"/></svg>
-        <span><b>退出程序</b><small>停止弹幕接收、预览与 OBS 输出</small></span>
-      </button>
-      <p class="control-close-hint">点击任务栏右下角的弹幕姬图标，可重新打开控制台。</p>
-      <button id="controlCloseCancelButton" class="control-close-cancel" type="button">取消</button>
+      <label class="control-close-remember"><input id="controlCloseRememberInput" type="checkbox"><span>记住我的选择</span></label>
+      <div class="control-close-actions">
+        <button id="controlCloseTrayButton" class="control-close-option control-close-primary" type="button" autofocus>最小化到托盘</button>
+        <button id="controlCloseQuitButton" class="control-close-option" type="button">退出程序</button>
+      </div>
     </div>
     <button id="controlCloseReturnButton" class="control-close-return hidden" type="button">返回控制台</button>
   </dialog>
 
   <script src="../js/lib/qrcode.js"></script>
+  <script src="themes.js"></script>
+  <script src="control-appearance-settings.js"></script>
+  <script src="control-appearance.js"></script>
   <script src="renderer.js"></script>
 </body>
 </html>

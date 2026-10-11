@@ -1,0 +1,22 @@
+{
+  "source": "Synthetic protocol bytes based on blivedm commit 93530bcc20de8a67f8d0ee4788096da2480b8a10; not a real account capture.",
+  "schema": "https://github.com/xfgryujk/blivedm/blob/93530bcc20de8a67f8d0ee4788096da2480b8a10/blivedm/models/pb.py",
+  "single": {
+    "cmd": "SEND_GIFT_V2",
+    "data": {
+      "pb": "CPuAgIAQEhLljY/orq7mtYvor5Xop4LkvJcaJ2h0dHBzOi8vaTAuaGRzbGIuY29tL2ZpeHR1cmUtYXZhdGFyLnBuZygDQg4IYyB7KAgyBumZquS8tFItCAESCeWwj+iKseiKsRgCKJBOOKCcAUIEZ29sZEoJZml4dHVyZS1hUMiQi9UG"
+    }
+  },
+  "multi": {
+    "cmd": "SEND_GIFT_V2",
+    "data": {
+      "pb": "CPuAgIAQEhLljY/orq7mtYvor5Xop4LkvJcaJ2h0dHBzOi8vaTAuaGRzbGIuY29tL2ZpeHR1cmUtYXZhdGFyLnBuZygDQg4IYyB7KAgyBumZquS8tFItCAESCeWwj+iKseiKsRgCKJBOOKCcAUIEZ29sZEoJZml4dHVyZS1hUMiQi9UGUikIAhIG5Za15aiYGAEoiCc4iCdCBGdvbGRKCWZpeHR1cmUtYlDIkIvVBlIvCAMSCeWwj+W/g+W/gxgBKAA4AEIGc2lsdmVySgxmaXh0dXJlLWZyZWVQyJCL1QY="
+    }
+  },
+  "blind": {
+    "cmd": "SEND_GIFT_V2",
+    "data": {
+      "pb": "CPuAgIAQEhLljY/orq7mtYvor5Xop4LkvJcaJ2h0dHBzOi8vaTAuaGRzbGIuY29tL2ZpeHR1cmUtYXZhdGFyLnBuZygDQg4IYyB7KAgyBumZquS8tEoRGgzmtYvor5Xnm7Lnm5IwkE5SNQgJEgzmir3kuK3npLzniakYAiigjQY4oJwBQgRnb2xkSg1maXh0dXJlLWJsaW5kUMiQi9UG"
+    }
+  }
+}

@@ -5,8 +5,11 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { createRelay } = require('./relay.js');
+const { createGiftImageLookup } = require('./desktop/gift-images.js');
+const { createMediaCache } = require('./desktop/media-cache.js');
 
 const ROOT = __dirname;
+const APP_VERSION = String(require('./package.json').version || '');
 const parsedPort = Number(process.env.PORT);
 const PORT = Number.isInteger(parsedPort) && parsedPort >= 0 ? parsedPort : 3000;
 const HOST = process.env.HOST || undefined;
@@ -36,21 +39,82 @@ let wbiKeyTime = 0;
 let cookies = {};
 let cachedUser = null;
 let cachedUserTime = 0;
+let cookieRevision = 0;
+let qrGeneration = 0;
+let activeQrKey = '';
+const API_TIMEOUT_MS = 8000;
 const roomEmoteCache = new Map();
 const ROOM_EMOTE_CACHE_TTL = 10 * 60 * 1000;
-const emoteImageCache = new Map();
-const MAX_EMOTE_IMAGE_CACHE = 48;
-const MAX_EMOTE_IMAGE_BYTES = 3 * 1024 * 1024;
-const MAX_EMOTE_IMAGE_CACHE_BYTES = 24 * 1024 * 1024;
-let emoteImageCacheBytes = 0;
-const userAvatarCache = new Map();
-const USER_AVATAR_CACHE_TTL = 6 * 60 * 60 * 1000;
-const MAX_USER_AVATAR_CACHE = 512;
+const MAX_ROOM_EMOTE_CACHE = 32;
+const MAX_ROOM_EMOTES = 1024;
+const MAX_ROOM_EMOTE_BYTES = 8 * 1024 * 1024;
+let roomEmoteCacheBytes = 0;
+const mediaCache = createMediaCache({
+  fetchImage: url => fetchWithTimeout(url, { headers: { 'User-Agent': UA, Referer: 'https://live.bilibili.com/' } }),
+  fetchAvatar: fetchUserAvatar
+});
 const desktopOutputClients = new Set();
+const desktopOutputCleanup = new Map();
+const MAX_DESKTOP_OUTPUT_BUFFER = 1024 * 1024;
 let desktopOutputBridge = null;
+const giftImageLookup = createGiftImageLookup({
+  async fetchCatalog(room) {
+    // Verified public giftPanel API: data.list[].id / img_basic.
+    const response = await apiFetch('https://api.live.bilibili.com/xlive/web-room/v1/giftPanel/giftConfig?platform=pc&source=live&room_id=' + encodeURIComponent(room), {
+      signal: AbortSignal.timeout(5000)
+    });
+    if (!response.ok) throw new Error('Gift catalogue request failed');
+    return response.json();
+  }
+});
 
 function setDesktopOutputBridge(bridge) {
+  const previous = desktopOutputBridge;
   desktopOutputBridge = bridge || null;
+  if (previous && previous !== desktopOutputBridge && typeof previous.onSubscribersChanged === 'function') {
+    try { previous.onSubscribersChanged(0); } catch (error) { console.warn('[desktop-output] subscriber callback failed:', error.message); }
+  }
+  notifyDesktopOutputSubscribers();
+}
+
+function notifyDesktopOutputSubscribers() {
+  if (!desktopOutputBridge || typeof desktopOutputBridge.onSubscribersChanged !== 'function') return;
+  try { desktopOutputBridge.onSubscribersChanged(desktopOutputClients.size); }
+  catch (error) { console.warn('[desktop-output] subscriber callback failed:', error.message); }
+}
+
+function removeDesktopOutputClient(client) {
+  const removed = desktopOutputClients.delete(client);
+  const cleanup = desktopOutputCleanup.get(client);
+  desktopOutputCleanup.delete(client);
+  if (cleanup) cleanup();
+  if (removed) notifyDesktopOutputSubscribers();
+}
+
+function disconnectDesktopOutputClient(client) {
+  removeDesktopOutputClient(client);
+  try { client.destroy(); } catch (_) {}
+}
+
+function writeDesktopOutputPayload(client, payload) {
+  // write(false) alone is ordinary stream backpressure. Only a client whose
+  // outstanding buffer exceeds 1 MiB is disconnected; EventSource can then
+  // reconnect to the current scene instead of accumulating unlimited snapshots.
+  if (client.destroyed || client.writableEnded || client.writableLength > MAX_DESKTOP_OUTPUT_BUFFER) {
+    disconnectDesktopOutputClient(client);
+    return false;
+  }
+  try {
+    client.write(payload);
+    if (client.writableLength > MAX_DESKTOP_OUTPUT_BUFFER) {
+      disconnectDesktopOutputClient(client);
+      return false;
+    }
+    return true;
+  } catch (_) {
+    disconnectDesktopOutputClient(client);
+    return false;
+  }
 }
 
 function desktopOutputEvent(type, data) {
@@ -59,7 +123,7 @@ function desktopOutputEvent(type, data) {
 }
 
 function writeDesktopOutputEvent(client, type, data) {
-  client.write(desktopOutputEvent(type, data));
+  return writeDesktopOutputPayload(client, desktopOutputEvent(type, data));
 }
 
 function publishDesktopOutput(type, data) {
@@ -68,36 +132,41 @@ function publishDesktopOutput(type, data) {
   // unused scene. All subscribers share one snapshot and serialization.
   const payload = desktopOutputEvent(type, typeof data === 'function' ? data() : data);
   for (const client of desktopOutputClients) {
-    try {
-      client.write(payload);
-    } catch (e) {
-      desktopOutputClients.delete(client);
-    }
+    writeDesktopOutputPayload(client, payload);
   }
 }
 
 function loadCookies() {
   try {
     cookies = JSON.parse(fs.readFileSync(COOKIE_FILE, 'utf8'));
+    if (!cookies || typeof cookies !== 'object' || Array.isArray(cookies)) cookies = {};
   } catch (e) {
     cookies = {};
   }
 }
 
-function saveCookies() {
+function saveCookies(value = cookies) {
+  const temporary = COOKIE_FILE + '.tmp';
   try {
     fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.writeFileSync(COOKIE_FILE, JSON.stringify(cookies, null, 2));
-  } catch (e) {
-    console.error('保存 cookie 失败:', e.message);
+    fs.writeFileSync(temporary, JSON.stringify(value, null, 2));
+    fs.renameSync(temporary, COOKIE_FILE);
+  } finally {
+    try { fs.unlinkSync(temporary); } catch (_) {}
   }
 }
 
-function cookieHeader() {
-  return Object.entries(cookies)
-    .filter(([, v]) => v !== '')
+function cookieHeader(value = cookies) {
+  return Object.entries(value)
+    .filter(([, v]) => typeof v === 'string' && v !== '')
     .map(([k, v]) => k + '=' + v)
     .join('; ');
+}
+
+function fetchWithTimeout(url, opts = {}) {
+  const timeout = AbortSignal.timeout(API_TIMEOUT_MS);
+  const signal = opts.signal ? AbortSignal.any([opts.signal, timeout]) : timeout;
+  return fetch(url, { ...opts, signal });
 }
 
 function apiFetch(url, opts) {
@@ -107,7 +176,19 @@ function apiFetch(url, opts) {
   }, (opts && opts.headers) || {});
   const cookie = cookieHeader();
   if (cookie !== '') headers.Cookie = cookie;
-  return fetch(url, Object.assign({}, opts, { headers }));
+  return fetchWithTimeout(url, Object.assign({}, opts, { headers }));
+}
+
+async function lookupUser(value) {
+  if (!value.SESSDATA) return null;
+  try {
+    const res = await fetchWithTimeout('https://api.bilibili.com/x/web-interface/nav', {
+      headers: { 'User-Agent': UA, Referer: 'https://live.bilibili.com/', Cookie: cookieHeader(value) }
+    });
+    const j = await res.json();
+    if (j.code === 0 && j.data && j.data.isLogin) return { uid: j.data.mid, uname: j.data.uname };
+  } catch (_) {}
+  return null;
 }
 
 async function getUserInfo() {
@@ -116,20 +197,15 @@ async function getUserInfo() {
   if (cachedUser && now - cachedUserTime < 5 * 60 * 1000) {
     return cachedUser;
   }
-  try {
-    const res = await apiFetch('https://api.bilibili.com/x/web-interface/nav');
-    const j = await res.json();
-    if (j.code === 0 && j.data && j.data.isLogin) {
-      cachedUser = { uid: j.data.mid, uname: j.data.uname };
-      cachedUserTime = now;
-      return cachedUser;
-    }
-  } catch (e) {}
-  cachedUser = null;
-  return null;
+  const revision = cookieRevision;
+  const user = await lookupUser(cookies);
+  if (revision !== cookieRevision) return null;
+  cachedUser = user;
+  cachedUserTime = Date.now();
+  return user;
 }
 
-function parseSetCookies(res) {
+function parseSetCookies(res, target = cookies) {
   let list = [];
   if (typeof res.headers.getSetCookie === 'function') {
     list = res.headers.getSetCookie();
@@ -141,16 +217,18 @@ function parseSetCookies(res) {
     const seg = item.split(';')[0].trim();
     const eq = seg.indexOf('=');
     if (eq <= 0) continue;
-    cookies[seg.slice(0, eq).trim()] = decodeURIComponent(seg.slice(eq + 1).trim());
+    const value = seg.slice(eq + 1).trim();
+    try { target[seg.slice(0, eq).trim()] = decodeURIComponent(value); }
+    catch (_) { target[seg.slice(0, eq).trim()] = value; }
   }
 }
 
 function json(res, code, data) {
+  if (res.destroyed || res.writableEnded) return;
   const body = JSON.stringify(data);
   res.writeHead(code, {
     'Content-Type': 'application/json; charset=utf-8',
-    'Cache-Control': 'no-store',
-    'Access-Control-Allow-Origin': '*'
+    'Cache-Control': 'no-store'
   });
   res.end(body);
 }
@@ -159,7 +237,7 @@ async function getWbiKey() {
   if (wbiKey && Date.now() - wbiKeyTime < 6 * 60 * 60 * 1000) {
     return wbiKey;
   }
-  const res = await fetch('https://api.bilibili.com/x/web-interface/nav', {
+  const res = await fetchWithTimeout('https://api.bilibili.com/x/web-interface/nav', {
     headers: { 'User-Agent': UA }
   });
   const j = await res.json();
@@ -199,12 +277,12 @@ async function proxyRoomInfo(roomId) {
 }
 
 function safeBilibiliImageUrl(rawUrl) {
-  if (!rawUrl) return '';
+  if (typeof rawUrl !== 'string' || !rawUrl || rawUrl.length > 2048) return '';
   try {
     const normalized = String(rawUrl).replace(/^http:\/\//i, 'https://').replace(/^\/\//, 'https://');
     const url = new URL(normalized);
     const host = url.hostname.toLowerCase();
-    if (url.protocol !== 'https:' || (!host.endsWith('.hdslb.com') && !host.endsWith('.bilibili.com'))) return '';
+    if (url.protocol !== 'https:' || url.username || url.password || (!host.endsWith('.hdslb.com') && !host.endsWith('.bilibili.com'))) return '';
     return url.href;
   } catch (e) {
     return '';
@@ -214,62 +292,28 @@ function safeBilibiliImageUrl(rawUrl) {
 async function proxyEmoteImage(res, rawUrl) {
   const url = safeBilibiliImageUrl(rawUrl);
   if (!url) return json(res, 400, { ok: false, error: 'invalid emote image URL' });
-
-  let cached = emoteImageCache.get(url);
-  if (!cached) {
-    const upstream = await apiFetch(url, {
-      headers: { Referer: 'https://live.bilibili.com/' }
-    });
-    const finalUrl = safeBilibiliImageUrl(upstream.url);
-    const contentType = String(upstream.headers.get('content-type') || '').split(';')[0].toLowerCase();
-    if (!upstream.ok || !finalUrl || !contentType.startsWith('image/')) {
-      return json(res, 502, { ok: false, error: 'emote image fetch failed' });
-    }
-    const body = Buffer.from(await upstream.arrayBuffer());
-    if (body.length > MAX_EMOTE_IMAGE_BYTES) {
-      return json(res, 413, { ok: false, error: 'emote image too large' });
-    }
-    cached = { body, contentType };
-    // Concurrent misses for one URL may complete after another request has
-    // cached it, so replace its byte accounting instead of counting it twice.
-    const previous = emoteImageCache.get(url);
-    if (previous) emoteImageCacheBytes -= previous.body.length;
-    emoteImageCache.set(url, cached);
-    emoteImageCacheBytes += body.length;
-    while (emoteImageCache.size > MAX_EMOTE_IMAGE_CACHE || emoteImageCacheBytes > MAX_EMOTE_IMAGE_CACHE_BYTES) {
-      const oldestUrl = emoteImageCache.keys().next().value;
-      emoteImageCacheBytes -= emoteImageCache.get(oldestUrl).body.length;
-      emoteImageCache.delete(oldestUrl);
-    }
+  try {
+    const image = await mediaCache.image(url);
+    if (res.destroyed) return;
+    res.writeHead(200, { 'Content-Type': image.contentType, 'Content-Length': image.body.length,
+      'Cache-Control': 'public, max-age=3600' });
+    res.end(image.body);
+  } catch (error) {
+    if (!res.destroyed) return json(res, error.statusCode || 502, { ok: false, error: error.message });
   }
-
-  res.writeHead(200, {
-    'Content-Type': cached.contentType,
-    'Content-Length': cached.body.length,
-    'Cache-Control': 'public, max-age=3600'
-  });
-  res.end(cached.body);
 }
 
-async function proxyUserAvatar(uid) {
-  const key = String(uid || '');
-  if (!/^\d+$/.test(key) || key === '0') return { ok: false, avatarUrl: '' };
-  const cached = userAvatarCache.get(key);
-  if (cached && Date.now() - cached.time < USER_AVATAR_CACHE_TTL) return cached.value;
-  let value = { ok: false, avatarUrl: '' };
-  try {
-    const response = await apiFetch('https://api.bilibili.com/x/web-interface/card?mid=' + encodeURIComponent(key), {
-      headers: { Referer: 'https://space.bilibili.com/' + encodeURIComponent(key) }
-    });
-    const body = await response.json();
-    const avatarUrl = safeBilibiliImageUrl(body && body.code === 0 && body.data && body.data.card && body.data.card.face);
-    if (avatarUrl) value = { ok: true, avatarUrl };
-  } catch (e) {}
-  userAvatarCache.set(key, { time: Date.now(), value });
-  while (userAvatarCache.size > MAX_USER_AVATAR_CACHE) {
-    userAvatarCache.delete(userAvatarCache.keys().next().value);
-  }
-  return value;
+async function fetchUserAvatar(uid) {
+  const response = await apiFetch('https://api.bilibili.com/x/web-interface/card?mid=' + encodeURIComponent(uid), {
+    headers: { Referer: 'https://space.bilibili.com/' + encodeURIComponent(uid) }
+  });
+  const body = await response.json();
+  const avatarUrl = safeBilibiliImageUrl(body && body.code === 0 && body.data && body.data.card && body.data.card.face);
+  return { ok: !!avatarUrl, avatarUrl };
+}
+
+function proxyUserAvatar(uid) {
+  return mediaCache.avatar(uid);
 }
 
 async function proxyRoomEmotes(roomId) {
@@ -291,15 +335,19 @@ async function proxyRoomEmotes(roomId) {
 
   const emotes = [];
   const seen = new Set();
-  packages.forEach((packageInfo) => {
+  const boundedName = value => typeof value === 'string' && value.length <= 120 ? value.trim() : '';
+  let inspected = 0;
+  for (const packageInfo of packages) {
+    if (++inspected > 4096 || emotes.length >= MAX_ROOM_EMOTES) break;
     const entries = packageInfo && Array.isArray(packageInfo.emoticons) ? packageInfo.emoticons : [];
-    entries.forEach((entry) => {
+    for (const entry of entries) {
+      if (++inspected > 4096 || emotes.length >= MAX_ROOM_EMOTES) break;
       const url = safeBilibiliImageUrl(entry && entry.url);
-      const unique = String(entry && entry.emoticon_unique || '').trim();
-      const emoji = String(entry && entry.emoji || '').trim();
-      if (!url || (!unique && !emoji)) return;
+      const unique = boundedName(entry && entry.emoticon_unique);
+      const emoji = boundedName(entry && entry.emoji);
+      if (!url || (!unique && !emoji)) continue;
       const dedupeKey = unique + '\n' + emoji + '\n' + url;
-      if (seen.has(dedupeKey)) return;
+      if (seen.has(dedupeKey)) continue;
       seen.add(dedupeKey);
       emotes.push({
         unique,
@@ -308,11 +356,23 @@ async function proxyRoomEmotes(roomId) {
         width: Number(entry.width) || 0,
         height: Number(entry.height) || 0
       });
-    });
-  });
+    }
+  }
 
   const value = { ok: true, roomId: key, emotes };
-  roomEmoteCache.set(key, { time: Date.now(), value });
+  // Match the renderer's 1024-input limit and bound long-lived catalogue data
+  // by estimated UTF-16 bytes as well as room count. No eviction timer needed.
+  const bytes = JSON.stringify(value).length * 2;
+  const previous = roomEmoteCache.get(key);
+  if (previous) roomEmoteCacheBytes -= previous.bytes;
+  roomEmoteCache.delete(key);
+  roomEmoteCache.set(key, { time: Date.now(), value, bytes });
+  roomEmoteCacheBytes += bytes;
+  while (roomEmoteCache.size > MAX_ROOM_EMOTE_CACHE || roomEmoteCacheBytes > MAX_ROOM_EMOTE_BYTES) {
+    const oldest = roomEmoteCache.keys().next().value;
+    roomEmoteCacheBytes -= roomEmoteCache.get(oldest).bytes;
+    roomEmoteCache.delete(oldest);
+  }
   return value;
 }
 
@@ -339,10 +399,22 @@ async function proxyDanmuInfo(roomId, retryWbi) {
 }
 
 const server = http
-  .createServer(async (req, res) => {    const url = new URL(req.url, 'http://localhost');
+  .createServer(async (req, res) => {
+    let url;
+    try { url = new URL(req.url, 'http://localhost'); }
+    catch (_) { return json(res, 400, { ok: false, error: 'invalid request URL' }); }
     const p = url.pathname;
 
     try {
+      if (/^\/api\/login\/(?:start|poll|logout)$/.test(p)) {
+        const origin = req.headers.origin;
+        let foreignOrigin = false;
+        try { foreignOrigin = !!origin && new URL(origin).origin !== new URL('http://' + req.headers.host).origin; }
+        catch (_) { foreignOrigin = true; }
+        if (foreignOrigin || req.headers['sec-fetch-site'] === 'cross-site') {
+          return json(res, 403, { ok: false, error: 'cross-site account operation denied' });
+        }
+      }
       if (p === '/api/room_info') {
         const roomId = url.searchParams.get('roomId');
         if (!roomId) return json(res, 400, { ok: false, error: 'roomId required' });
@@ -357,7 +429,10 @@ const server = http
         return json(res, 200, await proxyUserAvatar(url.searchParams.get('uid')));
       }
       if (p === '/api/emote_image') {
-        return proxyEmoteImage(res, url.searchParams.get('url'));
+        return await proxyEmoteImage(res, url.searchParams.get('url'));
+      }
+      if (p === '/api/gift_image') {
+        return json(res, 200, await giftImageLookup.lookup(url.searchParams.get('giftId'), url.searchParams.get('roomId')));
       }
       if (p === '/api/danmu_info') {
         const roomId = url.searchParams.get('roomId');
@@ -365,30 +440,47 @@ const server = http
         return json(res, 200, await proxyDanmuInfo(roomId));
       }
       if (p === '/api/login/start') {
-        const r = await fetch('https://passport.bilibili.com/x/passport-login/web/qrcode/generate', {
+        const generation = ++qrGeneration;
+        activeQrKey = '';
+        const r = await fetchWithTimeout('https://passport.bilibili.com/x/passport-login/web/qrcode/generate', {
           headers: { 'User-Agent': UA }
         });
         const j = await r.json();
+        if (generation !== qrGeneration || res.destroyed) return json(res, 409, { ok: false, error: '二维码请求已取消' });
         if (j.code !== 0 || !j.data) {
           return json(res, 502, { ok: false, error: '生成二维码失败: ' + (j.message || j.code) });
         }
-        return json(res, 200, { ok: true, qrcodeKey: j.data.qrcode_key, url: j.data.url });
+        activeQrKey = j.data.qrcode_key;
+        return json(res, 200, { ok: true, qrcodeKey: activeQrKey, url: j.data.url });
       }
       if (p === '/api/login/poll') {
         const key = url.searchParams.get('key');
         if (!key) return json(res, 400, { ok: false, error: 'key required' });
-        const r = await fetch(
+        const generation = qrGeneration;
+        const isCurrent = () => !res.destroyed && generation === qrGeneration && key === activeQrKey;
+        if (!isCurrent()) return json(res, 200, { ok: false, step: '86038', message: '二维码已更新，请重新扫码' });
+        const r = await fetchWithTimeout(
           'https://passport.bilibili.com/x/passport-login/web/qrcode/poll?qrcode_key=' + encodeURIComponent(key) + '&source=main-fe-header',
           { headers: { 'User-Agent': UA, Referer: 'https://www.bilibili.com/' } }
         );
         const j = await r.json();
+        if (!isCurrent()) return json(res, 200, { ok: false, step: '86038', message: '二维码请求已取消' });
         if (j.code === 0 && j.data && j.data.code === 0) {
-          parseSetCookies(r);
-          saveCookies();
-          const user = await getUserInfo();
+          const candidate = { ...cookies };
+          parseSetCookies(r, candidate);
+          const user = await lookupUser(candidate);
+          if (!isCurrent()) return json(res, 200, { ok: false, step: '86038', message: '二维码请求已取消' });
           if (!user) {
             return json(res, 200, { ok: false, step: 'validate-fail', message: '登录态验证失败，请重试' });
           }
+          // Commit only the current, still-open login request, after validation.
+          saveCookies(candidate);
+          cookies = candidate;
+          cookieRevision++;
+          cachedUser = user;
+          cachedUserTime = Date.now();
+          activeQrKey = '';
+          qrGeneration++;
           return json(res, 200, { ok: true, uid: user.uid, uname: user.uname });
         }
         const step = j.data ? String(j.data.code) : String(j.code);
@@ -402,11 +494,12 @@ const server = http
         return json(res, 200, { ok: true, loggedIn: false });
       }
       if (p === '/api/login/logout') {
+        qrGeneration++;
+        activeQrKey = '';
+        saveCookies({});
         cookies = {};
+        cookieRevision++;
         cachedUser = null;
-        try {
-          fs.rmSync(COOKIE_FILE, { force: true });
-        } catch (e) {}
         return json(res, 200, { ok: true });
       }
       if (p === '/api/status') {
@@ -433,30 +526,50 @@ const server = http
           Connection: 'keep-alive',
           'X-Accel-Buffering': 'no'
         });
-        res.write('retry: 1000\n\n');
-        desktopOutputClients.add(res);
-        if (typeof desktopOutputBridge.getState === 'function') {
-          const state = desktopOutputBridge.getState() || {};
-          writeDesktopOutputEvent(res, 'settings', state);
-          writeDesktopOutputEvent(res, 'scene', state.scene || { revision: 0, messages: [] });
-        }
-        const timer = setInterval(() => {
-          try { res.write(': keepalive\n\n'); } catch (e) {}
-        }, 15000);
-        req.on('close', () => {
-          clearInterval(timer);
-          desktopOutputClients.delete(res);
+        let timer = null;
+        const onClose = () => removeDesktopOutputClient(res);
+        const onError = () => disconnectDesktopOutputClient(res);
+        desktopOutputCleanup.set(res, () => {
+          if (timer !== null) clearInterval(timer);
+          timer = null;
+          req.removeListener('close', onClose);
+          res.removeListener('close', onClose);
+          res.removeListener('error', onError);
         });
+        req.on('close', onClose);
+        res.on('close', onClose);
+        res.on('error', onError);
+        desktopOutputClients.add(res);
+        notifyDesktopOutputSubscribers();
+        if (!writeDesktopOutputPayload(res, 'retry: 1000\n\n')) return;
+        try {
+          if (typeof desktopOutputBridge.getState === 'function') {
+            const state = desktopOutputBridge.getState() || {};
+            if (!writeDesktopOutputEvent(res, 'settings', state)) return;
+            if (!writeDesktopOutputEvent(res, 'scene', state.scene || { revision: 0, messages: [] })) return;
+          }
+        } catch (_) {
+          disconnectDesktopOutputClient(res);
+          return;
+        }
+        timer = setInterval(() => {
+          writeDesktopOutputPayload(res, ': keepalive\n\n');
+        }, 15000);
         return;
       }
     } catch (e) {
-      return json(res, 502, { ok: false, error: String(e.message || e) });
+      const status = Number.isInteger(e.statusCode) && e.statusCode >= 400 && e.statusCode <= 599 ? e.statusCode : 502;
+      return json(res, status, { ok: false, error: String(e.message || e) });
     }
 
-    let filePath = p;
+    let filePath;
+    try { filePath = decodeURIComponent(p); }
+    catch (_) { return json(res, 400, { ok: false, error: 'invalid path' }); }
     if (filePath === '/') filePath = '/index.html';
-    const file = path.join(ROOT, path.normalize(filePath));
-    if (!file.startsWith(ROOT)) {
+    const file = path.resolve(ROOT, '.' + filePath);
+    const relative = path.relative(ROOT, file).split(path.sep).join('/');
+    const publicAsset = relative === 'index.html' || /^(?:desktop|js|css)\/.*\.(?:html|css|js|svg|png|woff2)$/i.test(relative);
+    if (!publicAsset || relative.startsWith('../') || path.isAbsolute(relative)) {
       res.writeHead(403);
       res.end('Forbidden');
       return;
@@ -467,14 +580,22 @@ const server = http
         res.end('404 Not Found');
         return;
       }
-      const isCompressedPixelFont = file.endsWith('.fpb.gz');
       const headers = {
-        'Content-Type': isCompressedPixelFont ? 'application/octet-stream' : (MIME[path.extname(file)] || 'application/octet-stream'),
+        'Content-Type': MIME[path.extname(file)] || 'application/octet-stream',
         'Cache-Control': 'no-store'
       };
-      if (isCompressedPixelFont) headers['Content-Encoding'] = 'gzip';
+      let body = data;
+      if (file === path.join(ROOT, 'desktop', 'overlay.html')) {
+        // A page that survives an application upgrade can compare its own
+        // version with the new server, then request fresh HTML/JS/CSS once.
+        const versionAttribute = APP_VERSION.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        body = data.toString('utf8')
+          .replace('data-app-version=""', 'data-app-version="' + versionAttribute + '"')
+          .replace(/\b(src|href)="([^"]+\.(?:js|css))"/g, (_match, attribute, url) =>
+            attribute + '="' + url + '?v=' + encodeURIComponent(APP_VERSION) + '"');
+      }
       res.writeHead(200, headers);
-      res.end(data);
+      res.end(body);
     });
   })
   .listen(PORT, HOST, () => {

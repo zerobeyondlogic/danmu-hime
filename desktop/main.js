@@ -2,7 +2,17 @@
 
 const fs = require('fs');
 const path = require('path');
+const { randomUUID } = require('crypto');
 const { createLiveScene } = require('./live-scene.js');
+const { recoverWindowBounds } = require('./window-bounds.js');
+const stylePresets = require('./style-presets.js');
+const themes = require('./themes.js');
+const controlAppearanceSettings = require('./control-appearance-settings.js');
+const { createScAlerts } = require('./sc-alerts.js');
+const { createMessagePlayback } = require('./message-playback.js');
+const { createScExpiry } = require('./sc-expiry.js');
+const { createScDiagnostics } = require('./sc-diagnostics.js');
+const { safeEmoteUrl } = require('../js/emotes.js');
 const {
   app,
   BrowserWindow,
@@ -10,22 +20,23 @@ const {
   globalShortcut,
   ipcMain,
   Menu,
+  Notification,
   screen,
   Tray
 } = require('electron');
 
 const CONTROL_BOUNDS = { width: 468, height: 760 };
 // Used only when no saved preview size exists (fresh install/profile).
-const OVERLAY_BOUNDS = { width: 450, height: 650 };
+const OVERLAY_BOUNDS = { width: 515, height: 650 };
 const MIN_OVERLAY_BOUNDS = { width: 240, height: 160 };
 const OBS_PORT = 38426;
 const DIMENSION_MODEL_VERSION = 7;
 const UNLOCK_SHORTCUT = 'CommandOrControl+Shift+F10';
 const MAX_SCENE_MESSAGES = 48;
-const SCENE_PUBLISH_INTERVAL = 16;
 const OVERLAY_SNAP_DISTANCE = 12;
 const OVERLAY_SNAP_RELEASE_DISTANCE = 32;
 const APP_ICON = path.join(__dirname, 'assets', 'icon.png');
+const OUTPUT_SESSION_ID = randomUUID();
 
 let controlWindow = null;
 let appTray = null;
@@ -36,11 +47,13 @@ let controlCloseSequence = 0;
 let overlayWindow = null;
 let embedded = null;
 let liveScene = null;
+let scAlerts = null;
 let embeddedPort = OBS_PORT;
 let clickThrough = false;
 let overlayStatus = 'disconnected';
 let overlayHasConnected = false;
 let roomConnectionRequested = false;
+let desktopRoomGeneration = 0;
 let appState = {};
 let stateFile = '';
 let saveTimer = null;
@@ -53,11 +66,46 @@ let manualPreviewResizePending = false;
 let snappingOverlay = false;
 let suppressOverlaySnapUntil = 0;
 let overlaySnapState = { horizontal: null, vertical: null };
-let sceneMessages = [];
+let overlayBoundsRecoveryTimer = null;
+let overlayNativeMoveActive = false;
 let sceneRevision = 0;
 let nextSceneMessageId = 1;
-let scenePublishTimer = null;
 let previewResizeRequest = 0;
+let stylePresetApplyTask = null;
+let stylePresetApplying = false;
+const scDiagnostics = createScDiagnostics({ now: () => Date.now() });
+function recordScDiagnostic(event) {
+  scDiagnostics.record({ room: (appState.settings || {}).roomId, ...event });
+}
+const messagePlayback = createMessagePlayback({
+  maxPlayed: MAX_SCENE_MESSAGES,
+  now: () => Date.now(),
+  setTimer: (callback, delay) => setTimeout(callback, delay),
+  clearTimer: (timer) => clearTimeout(timer),
+  onChange() {
+    sceneRevision += 1;
+    flushScene();
+  },
+  onStateChange(state) {
+    sendTo(controlWindow, 'desktop:playback-changed', state);
+  }
+});
+const scExpiry = createScExpiry({
+  now: () => Date.now(),
+  setTimer: (callback, delay) => setTimeout(callback, delay),
+  clearTimer: (timer) => clearTimeout(timer),
+  onExpire(ids) {
+    for (const messageId of ids) recordScDiagnostic({ stage: 'expired', messageId });
+    if (scAlerts) scAlerts.cancel(ids);
+    messagePlayback.unpinMany(ids);
+  }
+});
+
+function syncScExpirySettings(settings = appState.settings) {
+  const theme = themes.resolveTheme(settings && settings.theme);
+  const config = settings && settings.themeConfigs && settings.themeConfigs[theme];
+  scExpiry.setNeverExpire((config || themes.defaults[theme]).scNeverExpire === true);
+}
 
 function cleanSceneString(value, maxLength) {
   return String(value === undefined || value === null ? '' : value).slice(0, maxLength);
@@ -65,7 +113,7 @@ function cleanSceneString(value, maxLength) {
 
 function sanitizeSceneMessage(value) {
   if (!value || typeof value !== 'object') return null;
-  const type = ['chat', 'gift', 'sc'].includes(value.type) ? value.type : 'chat';
+  const type = ['chat', 'gift', 'sc', 'welcome'].includes(value.type) ? value.type : 'chat';
   const role = ['host', 'manager', 'governor', 'admiral', 'captain', 'viewer'].includes(value.role)
     ? value.role
     : 'viewer';
@@ -85,7 +133,17 @@ function sanitizeSceneMessage(value) {
       : null,
     emotes: {}
   };
-  if (Number.isFinite(Number(value.valueYuan))) result.valueYuan = Number(value.valueYuan);
+  if (type === 'sc') result.scPinned = value.scPinned !== false;
+  const giftId = (typeof value.giftId === 'number' || typeof value.giftId === 'string') ? Number(value.giftId) : 0;
+  if (Number.isSafeInteger(giftId) && giftId > 0) result.giftId = giftId;
+  const giftImageUrl = typeof value.giftImageUrl === 'string' && value.giftImageUrl.length <= 2048
+    ? safeEmoteUrl(value.giftImageUrl) : '';
+  if (giftImageUrl) result.giftImageUrl = giftImageUrl;
+  const amount = typeof value.valueYuan === 'number' ? value.valueYuan
+    : typeof value.valueYuan === 'string' && value.valueYuan.trim() ? Number(value.valueYuan) : NaN;
+  if (Number.isFinite(amount)) {
+    result.valueYuan = amount;
+  }
   if (value.emotes && typeof value.emotes === 'object') {
     Object.entries(value.emotes).slice(0, 64).forEach(([key, emote]) => {
       if (!emote || typeof emote !== 'object') return;
@@ -100,62 +158,118 @@ function sanitizeSceneMessage(value) {
 
 function sceneSnapshot() {
   return {
+    sessionId: OUTPUT_SESSION_ID,
+    appVersion: app.getVersion(),
     revision: sceneRevision,
-    messages: sceneMessages.map((message) => Object.assign({}, message, {
+    playback: messagePlayback.getStats(),
+    messages: messagePlayback.getMessages().map((message) => Object.assign({}, message, {
       emotes: Object.assign({}, message.emotes)
     }))
   };
 }
 
 function flushScene() {
-  if (scenePublishTimer !== null) clearTimeout(scenePublishTimer);
-  scenePublishTimer = null;
   if (embedded && typeof embedded.publishDesktopOutput === 'function') {
     // Defer copying the scene until the server has an output subscriber.
     embedded.publishDesktopOutput('scene', sceneSnapshot);
   }
 }
 
-function publishScene() {
-  if (scenePublishTimer !== null) return;
-  // A burst still accepts and numbers every message, but OBS only needs the
-  // latest scene once per frame instead of every intermediate full snapshot.
-  scenePublishTimer = setTimeout(flushScene, SCENE_PUBLISH_INTERVAL);
-}
-
 function addSceneMessage(value) {
   const message = sanitizeSceneMessage(value);
   if (!message) return null;
   message.id = String(nextSceneMessageId++);
-  sceneMessages.push(message);
-  const regularMessages = sceneMessages.filter((item) => item.type !== 'sc');
-  if (regularMessages.length > MAX_SCENE_MESSAGES) {
-    const removeIds = new Set(
-      regularMessages.slice(0, regularMessages.length - MAX_SCENE_MESSAGES).map((item) => item.id)
-    );
-    sceneMessages = sceneMessages.filter((item) => !removeIds.has(item.id));
+  // Start SC lifetime at local receipt, before publishing any renderer data.
+  // message.at may originate from a replay/source and does not control expiry.
+  if (message.type === 'sc') {
+    message.scPinned = true;
+    scExpiry.track(message.id, message.valueYuan);
   }
-  sceneRevision += 1;
-  publishScene();
+  // Assign receipt identity at reception. The bounded played history is only
+  // updated when the shared playback queue reveals this regular message.
+  if (!messagePlayback.enqueue(message)) {
+    if (message.type === 'sc') {
+      scExpiry.remove(message.id);
+      recordScDiagnostic({ stage: 'dropped', reason: 'publish-rejected', messageId: message.id });
+    }
+    return null;
+  }
+  if (message.type === 'sc') recordScDiagnostic({ stage: 'published', messageId: message.id, amount: message.valueYuan });
   return Object.assign({}, message, { emotes: Object.assign({}, message.emotes) });
 }
 
-function dismissSceneMessage(id) {
-  const key = String(id || '');
-  const index = sceneMessages.findIndex((message) => message.id === key && message.type === 'sc');
-  if (index < 0) return false;
-  sceneMessages.splice(index, 1);
-  sceneRevision += 1;
-  publishScene();
-  return true;
+function updateSceneMessage(id, value) {
+  // Guard companion packets may arrive before their original card has left
+  // the queue. Update pending or played data without changing its identity,
+  // position or reception time; cleared/evicted receipts remain absent.
+  let scAmountChanged = false;
+  let nextAmount;
+  const updated = messagePlayback.update(id, (previous) => {
+    const next = sanitizeSceneMessage({ ...previous, ...value,
+      at: previous.at, time: previous.time, gapMs: previous.gapMs });
+    if (next && previous.type === 'sc' && !Object.is(previous.valueYuan, next.valueYuan)) {
+      scAmountChanged = true;
+      nextAmount = next.valueYuan;
+    }
+    return next;
+  });
+  // Run after the played update commits: shortening a lifetime may immediately
+  // expire this card, and an unfinished update must never reinsert it afterward.
+  if (updated && scAmountChanged) scExpiry.update(id, nextAmount);
+  return updated;
 }
 
-function clearScene() {
-  sceneMessages = [];
-  sceneRevision += 1;
+function receiveLiveMessage(value) {
+  const message = addSceneMessage(value);
+  if (message && message.type === 'sc' && scAlerts) scAlerts.notify(message);
+  return message;
+}
+
+function addWelcomeMessage(entry) {
+  if (app.isQuitting || !entry || typeof entry.uname !== 'string') return null;
+  const current = appState.settings || {};
+  const theme = themes.resolveTheme(current.theme);
+  const config = current.themeConfigs && current.themeConfigs[theme];
+  // Disabled welcomes must not fill the shared history and evict real chat.
+  if ((config || themes.defaults[theme]).showWelcome === false) return null;
+  const uname = cleanSceneString(entry.uname, 120).replace(/[\u0000-\u001f\u007f]/g, '').trim();
+  const uid = Number(entry.uid);
+  if (!uname || !Number.isSafeInteger(uid) || uid <= 0) return null;
+  return addSceneMessage({
+    type: 'welcome', uid, uname, avatarUrl: entry.avatarUrl,
+    text: '欢迎 ' + uname + ' 进入直播间', at: entry.at
+  });
+}
+
+function dismissSceneMessage(id) {
+  const unpinned = messagePlayback.unpinMany([id]) > 0;
+  if (unpinned) {
+    recordScDiagnostic({ stage: 'unpinned', messageId: id });
+    scExpiry.remove(id);
+    if (scAlerts) scAlerts.cancel([id]);
+  }
+  return unpinned;
+}
+
+function removeUpstreamSc(ids) {
+  if (!Array.isArray(ids)) return 0;
+  const unique = [...new Set(ids.map(String))];
+  for (const messageId of unique) {
+    scExpiry.remove(messageId);
+    recordScDiagnostic({ stage: 'removed', reason: 'upstream-delete', messageId });
+  }
+  if (scAlerts) scAlerts.cancel(unique);
+  return messagePlayback.dismissMany(unique);
+}
+
+function clearScene(reason = 'manual-clear') {
+  recordScDiagnostic({ stage: 'clear', reason });
+  if (scAlerts) scAlerts.clear();
+  scExpiry.clear();
+  // Clear both displayed and not-yet-displayed cards and invalidate timers
+  // before publishing the empty scene. Old rooms cannot resume later.
+  messagePlayback.clear();
   sendTo(overlayWindow, 'desktop:scene-cleared', sceneRevision);
-  // Clear immediately and cancel any pending snapshot from the old room.
-  flushScene();
 }
 
 function addPreviewMessages() {
@@ -185,6 +299,11 @@ function loadState() {
   } catch (e) {
     appState = {};
   }
+  if (!appState || typeof appState !== 'object' || Array.isArray(appState)) appState = {};
+  appState.controlAppearance = controlAppearanceSettings.normalize(appState.controlAppearance);
+  appState.settings = themes.migrateSettings(appState.settings);
+  syncScExpirySettings();
+  appState.stylePresets = stylePresets.normalizeStylePresets(appState.stylePresets);
   if (appState.settings && typeof appState.settings === 'object') {
     delete appState.settings.obsWidth;
     delete appState.settings.obsHeight;
@@ -212,24 +331,67 @@ function loadState() {
     appState.dimensionModelVersion = DIMENSION_MODEL_VERSION;
     saveStateNow();
   }
+  appState.activeStylePresetId = stylePresets.restoreStylePresetId(appState);
 }
 
 function saveStateSoon() {
   if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = null;
+  // A preset commits its style and dimensions together after resizing settles.
+  if (stylePresetApplying) return;
   saveTimer = setTimeout(() => {
     saveStateNow();
   }, 150);
 }
 
-function saveStateNow() {
+function saveStateNow(allowPresetCommit = false) {
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = null;
+  if (stylePresetApplying && !allowPresetCommit) return false;
   try {
     fs.mkdirSync(path.dirname(stateFile), { recursive: true });
-    fs.writeFileSync(stateFile, JSON.stringify(appState, null, 2));
+    const serialized = JSON.stringify(appState, null, 2);
+    // Every save preserves the previous complete profile on a partial write.
+    const temporary = stateFile + '.tmp';
+    try {
+      fs.writeFileSync(temporary, serialized);
+      fs.renameSync(temporary, stateFile);
+    } finally {
+      try { fs.unlinkSync(temporary); } catch (e) {}
+    }
+    return true;
   } catch (e) {
     console.error('[desktop] 保存设置失败:', e.message);
+    return false;
   }
+}
+
+function getControlCloseAction() {
+  return ['tray', 'quit'].includes(appState.closeAction) ? appState.closeAction : 'ask';
+}
+
+function setControlAppearance(value) {
+  requireStylePresetIdle();
+  const previous = appState.controlAppearance;
+  const appearance = controlAppearanceSettings.normalize(value);
+  appState.controlAppearance = appearance;
+  if (!saveStateNow(true)) {
+    appState.controlAppearance = previous;
+    throw new Error('主界面外观保存失败，请重试。');
+  }
+  return { controlAppearance: { ...appearance } };
+}
+
+function setControlCloseAction(action) {
+  if (!['ask', 'tray', 'quit'].includes(action)) throw new Error('Invalid control close action');
+  const previous = appState.closeAction;
+  appState.closeAction = action;
+  if (!saveStateNow()) {
+    appState.closeAction = previous;
+    throw new Error('Unable to save control close action');
+  }
+  sendTo(controlWindow, 'desktop:close-action-changed', action);
+  return { closeAction: action };
 }
 
 function sendTo(window, channel, payload) {
@@ -261,7 +423,10 @@ function setOverlayAlwaysOnTop(enabled) {
 
 function setOverlayResizableForSettings() {
   if (!overlayWindow || overlayWindow.isDestroyed()) return;
-  overlayWindow.setResizable((appState.settings || {}).overlaySizeLocked !== true);
+  // Keep the native hit-test/size-constraint path stable for transparent
+  // Windows output. Lock manual resizing with will-resize instead of changing
+  // Electron's resizable flag underneath the SC's no-drag interaction area.
+  overlayWindow.setResizable(process.platform === 'win32' || (appState.settings || {}).overlaySizeLocked !== true);
 }
 
 function waitForListening(server) {
@@ -291,12 +456,16 @@ function outputState() {
   const current = appState.settings || {};
   const preview = getPreviewSize();
   return {
+    sessionId: OUTPUT_SESSION_ID,
+    appVersion: app.getVersion(),
     settings: withPreviewCanvas(current, roomConnectionRequested ? String(current.roomId || '') : ''),
     canvas: {
       width: preview.width,
       height: preview.height
     },
     connectedRequested: roomConnectionRequested,
+    scDiagnostics: scDiagnostics.getSnapshot(),
+    playback: messagePlayback.getStats(),
     scene: sceneSnapshot()
   };
 }
@@ -426,7 +595,7 @@ function setReportedStatus(status) {
     return;
   }
   const next = String(status || 'disconnected');
-  if (next === 'reconnect' && overlayStatus !== 'reconnect') clearScene();
+  if (next === 'reconnect' && overlayStatus !== 'reconnect') clearScene('reconnect');
   overlayStatus = next;
   overlayHasConnected = next === 'open';
   if (overlayHasConnected) syncPreviewWindow();
@@ -441,22 +610,42 @@ function beginRoomConnection() {
 function connectDesktopRoom(roomId) {
   const normalized = String(roomId || '').trim();
   if (!/^\d+$/.test(normalized) || !liveScene) return false;
+  const previousRoom = String((appState.settings || {}).roomId || '');
+  const wasConnected = roomConnectionRequested;
+  const generation = ++desktopRoomGeneration;
   roomConnectionRequested = true;
   appState.settings = Object.assign({}, appState.settings, { roomId: normalized });
   saveStateSoon();
-  clearScene();
+  clearScene(previousRoom && previousRoom !== normalized ? 'room-switch' : wasConnected ? 'reconnect' : 'connect');
   beginRoomConnection();
   syncPreviewWindow();
   sendTo(overlayWindow, 'desktop:settings-changed', withPreviewCanvas(appState.settings, normalized));
   publishOutputSettings();
   liveScene.connect(normalized).catch((error) => {
+    if (app.isQuitting || generation !== desktopRoomGeneration || !roomConnectionRequested) return;
     console.error('[desktop] 连接直播间失败:', error.message);
-    if (!app.isQuitting) setReportedStatus('api-fail');
+    setReportedStatus('api-fail');
   });
   return true;
 }
 
+function disconnectDesktopRoom() {
+  if (app.isQuitting) return false;
+  desktopRoomGeneration += 1;
+  roomConnectionRequested = false;
+  if (liveScene) liveScene.disconnect();
+  messagePlayback.cancelPending();
+  setReportedStatus('disconnected');
+  // Keep the chosen room and all existing output windows. The controller can
+  // reconnect it later; renderers receive an empty active room while stopped.
+  sendTo(overlayWindow, 'desktop:settings-changed', withPreviewCanvas(appState.settings, ''));
+  publishOutputSettings();
+  return true;
+}
+
 function clearPreviewRuntime() {
+  cancelOverlayBoundsRecovery();
+  overlayNativeMoveActive = false;
   previewResizeRequest += 1;
   const waiters = previewViewportWaiters;
   previewViewportWaiters = [];
@@ -484,9 +673,9 @@ function syncPreviewWindow() {
     releaseOverlayWindow();
     return null;
   }
-  if (!roomConnectionRequested && !sceneMessages.length) return null;
+  if (!roomConnectionRequested && !messagePlayback.hasMessages()) return null;
   const window = createOverlayWindow(embeddedPort);
-  if ((overlayHasConnected || sceneMessages.length) && window && !window.webContents.isLoadingMainFrame()) {
+  if ((overlayHasConnected || messagePlayback.hasMessages()) && window && !window.webContents.isLoadingMainFrame()) {
     window.showInactive();
     setClickThrough(clickThrough);
   }
@@ -494,6 +683,7 @@ function syncPreviewWindow() {
 }
 
 function setPreviewEnabled(enabled) {
+  if (enabled && scAlerts) scAlerts.clear();
   appState.settings = Object.assign({}, appState.settings, { previewEnabled: !!enabled });
   saveStateSoon();
   syncPreviewWindow();
@@ -515,6 +705,40 @@ function rememberBounds(window, key) {
   if (!window || window.isDestroyed() || window.isMaximized() || window.isMinimized()) return;
   appState[key] = window.getBounds();
   saveStateSoon();
+}
+
+function cancelOverlayBoundsRecovery() {
+  if (overlayBoundsRecoveryTimer !== null) clearTimeout(overlayBoundsRecoveryTimer);
+  overlayBoundsRecoveryTimer = null;
+}
+
+function recoverOverlayToWorkArea(window = overlayWindow) {
+  if (!window || window !== overlayWindow || window.isDestroyed() || app.isQuitting ||
+      snappingOverlay || overlayNativeMoveActive || applyingPreviewSize ||
+      window.isMaximized() || window.isMinimized()) return false;
+  const bounds = window.getBounds();
+  const next = recoverWindowBounds(bounds, screen.getAllDisplays().map((display) => display.workArea));
+  if (next.x === bounds.x && next.y === bounds.y) return false;
+  overlaySnapState = { horizontal: null, vertical: null };
+  snappingOverlay = true;
+  try {
+    window.setBounds(next, false);
+  } finally {
+    snappingOverlay = false;
+  }
+  rememberBounds(window, 'overlayBounds');
+  return true;
+}
+
+function scheduleOverlayBoundsRecovery(window = overlayWindow, delay = 0) {
+  if (!window || window !== overlayWindow || window.isDestroyed() || app.isQuitting) return;
+  cancelOverlayBoundsRecovery();
+  if (overlayNativeMoveActive || snappingOverlay) return;
+  const wait = Math.max(delay, suppressOverlaySnapUntil - Date.now() + 1, 0);
+  overlayBoundsRecoveryTimer = setTimeout(() => {
+    overlayBoundsRecoveryTimer = null;
+    recoverOverlayToWorkArea(window);
+  }, wait);
 }
 
 function snapOverlayToDisplayEdges() {
@@ -585,8 +809,10 @@ function secureWindow(window, port) {
 function createOverlayWindow(port) {
   if (app.isQuitting || (appState.settings || {}).previewEnabled === false) return null;
   if (overlayWindow && !overlayWindow.isDestroyed()) return overlayWindow;
-  const bounds = clampBounds(appState.overlayBounds, OVERLAY_BOUNDS, MIN_OVERLAY_BOUNDS.width, MIN_OVERLAY_BOUNDS.height);
   const requested = getRequestedPreviewSize();
+  const bounds = recoverWindowBounds(Object.assign(
+    {}, clampBounds(appState.overlayBounds, OVERLAY_BOUNDS, MIN_OVERLAY_BOUNDS.width, MIN_OVERLAY_BOUNDS.height), requested
+  ), screen.getAllDisplays().map((display) => display.workArea));
   overlayWindow = new BrowserWindow({
     x: bounds.x,
     y: bounds.y,
@@ -600,9 +826,9 @@ function createOverlayWindow(port) {
     backgroundColor: '#00000000',
     hasShadow: false,
     thickFrame: false,
-    // Keep the custom resize handles, but allow Electron to honor
-    // setContentSize() on Windows high-DPI displays.
-    resizable: (appState.settings || {}).overlaySizeLocked !== true,
+    // Windows uses a will-resize veto for the size lock. Native resizability
+    // stays stable so ordinary movement and SC pointer events are unaffected.
+    resizable: process.platform === 'win32' || (appState.settings || {}).overlaySizeLocked !== true,
     maximizable: false,
     fullscreenable: false,
     alwaysOnTop: true,
@@ -621,8 +847,35 @@ function createOverlayWindow(port) {
 
   const window = overlayWindow;
   secureWindow(window, port);
+  if (process.platform === 'win32') {
+    // Native drag loops can pause at a monitor boundary. Recover only after
+    // WM_EXITSIZEMOVE, so crossing monitors never gets clamped mid-drag.
+    window.hookWindowMessage(0x0231, () => {
+      if (window !== overlayWindow) return;
+      overlayNativeMoveActive = true;
+      cancelOverlayBoundsRecovery();
+    });
+    window.hookWindowMessage(0x0232, () => {
+      if (window !== overlayWindow) return;
+      overlayNativeMoveActive = false;
+      scheduleOverlayBoundsRecovery(window);
+    });
+  }
   setOverlayAlwaysOnTop((appState.settings || {}).alwaysOnTop !== false);
   setOverlayResizableForSettings();
+  window.on('will-resize', (event) => {
+    if (window !== overlayWindow || window.isDestroyed()) return;
+    // Electron emits this only for manual native resizing. Explicit numeric
+    // sizing, preset application and DPI corrections still use setContentSize
+    // / setBounds, and ordinary window dragging uses the separate move path.
+    if ((appState.settings || {}).overlaySizeLocked === true) event.preventDefault();
+  });
+  const clearVisibleScAlert = () => {
+    if (window === overlayWindow && !window.isDestroyed() &&
+        window.isVisible() && !window.isMinimized() && scAlerts) scAlerts.clear();
+  };
+  window.on('show', clearVisibleScAlert);
+  window.on('restore', clearVisibleScAlert);
   window.once('ready-to-show', () => {
     if (window !== overlayWindow || window.isDestroyed() || app.isQuitting) return;
     setClickThrough(clickThrough);
@@ -630,16 +883,19 @@ function createOverlayWindow(port) {
     // this page was loading. Always use the latest saved size.
     const target = getRequestedPreviewSize();
     setOverlayContentSize(target.width, target.height).catch((error) => console.warn('[desktop] 更新预览尺寸失败:', error.message));
-    if (overlayHasConnected || sceneMessages.length) window.showInactive();
+    if (overlayHasConnected || messagePlayback.hasMessages()) window.showInactive();
   });
   window.on('resize', () => {
     rememberBounds(window, 'overlayBounds');
+    scheduleOverlayBoundsRecovery(window, 160);
   });
   window.on('move', () => {
     if (window !== overlayWindow) return;
     snapOverlayToDisplayEdges();
     rememberBounds(window, 'overlayBounds');
+    scheduleOverlayBoundsRecovery(window, 160);
   });
+  window.on('moved', () => scheduleOverlayBoundsRecovery(window));
   window.on('close', (event) => {
     if (app.isQuitting) return;
     event.preventDefault();
@@ -673,6 +929,53 @@ function ensureTray() {
   }
   appTray = tray;
   return appTray;
+}
+
+function openScPreview() {
+  if (app.isQuitting) return null;
+  // A notification is an explicit request to interact with the SC card.
+  setClickThrough(false);
+  setPreviewEnabled(true);
+  const window = overlayWindow;
+  if (!window || window.isDestroyed()) return null;
+  const reveal = () => {
+    if (window !== overlayWindow || window.isDestroyed() || app.isQuitting) return;
+    if (window.isMinimized()) window.restore();
+    recoverOverlayToWorkArea(window);
+    window.show();
+    window.moveTop();
+    window.focus();
+  };
+  if (window.webContents.isLoadingMainFrame()) window.once('ready-to-show', reveal);
+  else reveal();
+  return window;
+}
+
+function initializeScAlerts() {
+  scAlerts = createScAlerts({
+    hasPreview: () => !!(overlayWindow && !overlayWindow.isDestroyed() &&
+      overlayWindow.isVisible() && !overlayWindow.isMinimized()),
+    createNotification: options => Notification.isSupported()
+      ? new Notification({ ...options, icon: APP_ICON }) : null,
+    onOpen: openScPreview,
+    showFallback(options, onClick) {
+      const tray = ensureTray();
+      if (typeof tray.displayBalloon !== 'function') return;
+      tray.on('balloon-click', onClick);
+      try {
+        tray.displayBalloon({ title: options.title, content: options.body,
+          icon: APP_ICON, noSound: true, respectQuietTime: true });
+      } catch (error) {
+        tray.removeListener('balloon-click', onClick);
+        throw error;
+      }
+      return () => tray.removeListener('balloon-click', onClick);
+    },
+    hideFallback() {
+      if (appTray && !appTray.isDestroyed() && typeof appTray.removeBalloon === 'function') appTray.removeBalloon();
+    },
+    onError: error => console.warn('[desktop] SC 提醒失败:', error.message)
+  });
 }
 
 function showControlWindow() {
@@ -730,18 +1033,19 @@ function askControlClose(window) {
       contents.removeListener('render-process-gone', onClosed);
       resolve(response);
     };
-    const onChoice = (event, receivedToken, action) => {
+    const onChoice = (event, receivedToken, action, remember) => {
       if (event.sender !== contents || receivedToken !== token) return;
-      const choices = { tray: 0, quit: 1, cancel: 2 };
-      if (Object.prototype.hasOwnProperty.call(choices, action)) finish(choices[action]);
+      if (['tray', 'quit', 'cancel'].includes(action)) {
+        finish({ action, remember: action !== 'cancel' && remember === true });
+      }
     };
-    const onClosed = () => finish(2);
+    const onClosed = () => finish({ action: 'cancel', remember: false });
     const onLoadFailed = (_event, _code, _description, _url, isMainFrame) => {
-      if (isMainFrame !== false) finish(2);
+      if (isMainFrame !== false) onClosed();
     };
     const showPrompt = () => {
       if (app.isQuitting || window.isDestroyed() || contents.isDestroyed()) {
-        finish(2);
+        onClosed();
         return;
       }
       if (window.isMinimized()) window.restore();
@@ -752,7 +1056,7 @@ function askControlClose(window) {
       try {
         contents.send('desktop:control-close-prompt', { token });
       } catch (e) {
-        finish(2);
+        onClosed();
       }
     };
     controlClosePromptFinish = finish;
@@ -773,7 +1077,7 @@ function requestControlClose(window = controlWindow, quitDirectly = false) {
   if (controlCloseTask) {
     if (quitDirectly) {
       controlQuitRequested = true;
-      if (controlClosePromptFinish) controlClosePromptFinish(1);
+      if (controlClosePromptFinish) controlClosePromptFinish({ action: 'quit', remember: false });
     }
     return controlCloseTask;
   }
@@ -783,11 +1087,16 @@ function requestControlClose(window = controlWindow, quitDirectly = false) {
       if (quitDirectly) app.quit();
       return;
     }
-    let response = quitDirectly ? 1 : await askControlClose(window);
-    if (controlQuitRequested) response = 1;
-    if (response === 2 || app.isQuitting || window.isDestroyed()) return;
-    if (response !== 0 && response !== 1) return;
-    if (response === 0) ensureTray();
+    const closeAction = getControlCloseAction();
+    const choice = quitDirectly
+      ? { action: 'quit', remember: false }
+      : closeAction === 'ask'
+        ? await askControlClose(window)
+        : { action: closeAction, remember: false };
+    const response = controlQuitRequested ? 'quit' : choice.action;
+    if (app.isQuitting || window.isDestroyed()) return;
+    if (response !== 'tray' && response !== 'quit') return;
+    if (response === 'tray') ensureTray();
 
     // Freeze edits while the renderer flushes its pending settings / resize work.
     window.setEnabled(false);
@@ -799,8 +1108,16 @@ function requestControlClose(window = controlWindow, quitDirectly = false) {
       return;
     }
     rememberBounds(window, 'controlBounds');
-    saveStateNow();
-    if (response === 1 || controlQuitRequested) {
+    const previousCloseAction = appState.closeAction;
+    const rememberChoice = choice.remember && !controlQuitRequested;
+    if (rememberChoice) appState.closeAction = response;
+    if (!saveStateNow()) {
+      appState.closeAction = previousCloseAction;
+      sendTo(window, 'desktop:control-close-error', '设置保存失败，请稍后重试。');
+      return;
+    }
+    if (rememberChoice) sendTo(window, 'desktop:close-action-changed', response);
+    if (response === 'quit' || controlQuitRequested) {
       app.quit();
     } else {
       // Release the settings renderer, while the output renderer and relay live on.
@@ -869,20 +1186,6 @@ function createControlWindow(port) {
   return window;
 }
 
-function resetOverlayBounds() {
-  if (!overlayHasConnected || !overlayWindow || overlayWindow.isDestroyed()) return;
-  const display = screen.getPrimaryDisplay().workArea;
-  // This action is labelled as a position reset, so it must preserve the
-  // user's chosen size—especially while the size lock is enabled.
-  overlaySnapState = { horizontal: null, vertical: null };
-  suppressOverlaySnapUntil = Date.now() + 120;
-  overlayWindow.setPosition(display.x + 24, display.y + 24, false);
-  overlayWindow.show();
-  setClickThrough(false);
-  overlayWindow.focus();
-  rememberBounds(overlayWindow, 'overlayBounds');
-}
-
 async function setOverlayContentSize(width, height) {
   const targetWidth = Math.max(MIN_OVERLAY_BOUNDS.width, Math.min(3840, Math.round(Number(width) || OVERLAY_BOUNDS.width)));
   const targetHeight = Math.max(MIN_OVERLAY_BOUNDS.height, Math.min(2160, Math.round(Number(height) || OVERLAY_BOUNDS.height)));
@@ -935,6 +1238,7 @@ async function setOverlayContentSize(width, height) {
   }
   if (!isCurrent()) return overlayGeometry();
   appState.requestedPreviewSize = { width: targetWidth, height: targetHeight };
+  scheduleOverlayBoundsRecovery(window);
   syncPreviewMetrics();
   return overlayGeometry();
 }
@@ -945,6 +1249,7 @@ async function resizeOverlay(width, height) {
 
 function setOverlayBounds(nextBounds) {
   if (!overlayWindow || overlayWindow.isDestroyed() || !nextBounds) return null;
+  if (stylePresetApplying) return overlayGeometry();
   if ((appState.settings || {}).overlaySizeLocked === true) return overlayGeometry();
   const current = overlayWindow.getBounds();
   const width = Math.max(MIN_OVERLAY_BOUNDS.width, Math.min(3840, Math.round(Number(nextBounds.width) || current.width)));
@@ -959,11 +1264,145 @@ function setOverlayBounds(nextBounds) {
   return overlayGeometry();
 }
 
+function requireControlSender(event) {
+  if (!controlWindow || controlWindow.isDestroyed() || event.sender !== controlWindow.webContents) {
+    throw new Error('只有控制台可以管理样式预设。');
+  }
+}
+
+function requireStylePresetIdle() {
+  if (stylePresetApplying) throw new Error('正在套用预设，请稍后重试。');
+}
+
+function commitStylePresetList(result, selectSaved = false) {
+  requireStylePresetIdle();
+  const previous = appState.stylePresets;
+  const previousActive = appState.activeStylePresetId;
+  const nextActive = selectSaved ? result.preset.id : stylePresets.restoreStylePresetId(appState);
+  appState.stylePresets = result.presets;
+  appState.activeStylePresetId = result.presets.some(preset => preset.id === nextActive) ? nextActive : '';
+  if (!saveStateNow(true)) {
+    appState.stylePresets = previous;
+    if (previousActive === undefined) delete appState.activeStylePresetId;
+    else appState.activeStylePresetId = previousActive;
+    throw new Error('预设保存失败，请检查磁盘空间后重试。');
+  }
+  return { ...result, activeStylePresetId: appState.activeStylePresetId };
+}
+
+function broadcastAppliedStyle() {
+  syncScExpirySettings();
+  const updates = [
+    () => sendTo(overlayWindow, 'desktop:settings-changed', withPreviewCanvas(
+      appState.settings,
+      roomConnectionRequested ? (appState.settings || {}).roomId : ''
+    )),
+    () => sendTo(controlWindow, 'desktop:overlay-bounds-changed', overlayGeometry()),
+    publishOutputSettings
+  ];
+  updates.forEach((update) => {
+    try { update(); } catch (error) {
+      // A window can disappear while resizing. A later renderer/OBS reconnect
+      // reads the committed state; it must not undo an already saved preset.
+      console.warn('[desktop] 同步预设外观失败:', error.message);
+    }
+  });
+}
+
+function applyStylePreset(id) {
+  requireStylePresetIdle();
+  const preset = stylePresets.findStylePreset(appState.stylePresets, id);
+  const previousSettings = appState.settings;
+  const previousActive = appState.activeStylePresetId;
+  const previousRequested = appState.requestedPreviewSize;
+  const previousPreview = appState.previewSize;
+  const previousBounds = appState.overlayBounds;
+  const previousSize = getPreviewSize();
+  const window = overlayWindow;
+  const previousWindowBounds = window && !window.isDestroyed() ? window.getBounds() : null;
+  stylePresetApplying = true;
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = null;
+  stylePresetApplyTask = (async () => {
+    try {
+      appState.settings = stylePresets.settingsForStylePreset(appState.settings, preset);
+      // Explicitly choosing a preset may resize a manually locked output. This
+      // does not create a preview renderer when desktop preview is disabled.
+      await setOverlayContentSize(preset.width, preset.height);
+      appState.activeStylePresetId = preset.id;
+      if (!saveStateNow(true)) throw new Error('预设套用后保存失败，请检查磁盘空间后重试。');
+      broadcastAppliedStyle();
+      return { settings: withPreviewCanvas(appState.settings), canvas: getPreviewSize(), preset };
+    } catch (error) {
+      if (previousActive === undefined) delete appState.activeStylePresetId;
+      else appState.activeStylePresetId = previousActive;
+      const current = appState.settings || {};
+      appState.settings = Object.assign({}, current, {
+        theme: previousSettings && previousSettings.theme,
+        themeConfigVersion: previousSettings && previousSettings.themeConfigVersion,
+        themeConfigs: previousSettings && previousSettings.themeConfigs
+      });
+      try {
+        await setOverlayContentSize(previousSize.width, previousSize.height);
+        if (previousWindowBounds && window === overlayWindow && !window.isDestroyed()) {
+          window.setBounds(previousWindowBounds);
+        }
+      } catch (rollbackError) {
+        console.warn('[desktop] 恢复预设前的窗口尺寸失败:', rollbackError.message);
+      }
+      appState.requestedPreviewSize = previousRequested;
+      appState.previewSize = previousPreview;
+      appState.overlayBounds = previousBounds;
+      // A failed write must never remain scheduled to persist the failed style.
+      if (saveTimer) clearTimeout(saveTimer);
+      saveTimer = null;
+      broadcastAppliedStyle();
+      throw error;
+    } finally {
+      stylePresetApplying = false;
+      stylePresetApplyTask = null;
+    }
+  })();
+  return stylePresetApplyTask;
+}
+
 function bindIpc() {
+  ipcMain.handle('desktop:set-control-appearance', (event, value) => {
+    requireControlSender(event);
+    return setControlAppearance(value);
+  });
+  ipcMain.handle('desktop:list-style-presets', (event) => {
+    requireControlSender(event);
+    return { presets: stylePresets.normalizeStylePresets(appState.stylePresets), activeStylePresetId: stylePresets.restoreStylePresetId(appState) };
+  });
+  ipcMain.handle('desktop:save-style-preset', (event, value) => {
+    requireControlSender(event);
+    requireStylePresetIdle();
+    return commitStylePresetList(stylePresets.saveStylePreset(appState.stylePresets, value), true);
+  });
+  ipcMain.handle('desktop:rename-style-preset', (event, id, name) => {
+    requireControlSender(event);
+    requireStylePresetIdle();
+    return commitStylePresetList(stylePresets.renameStylePreset(appState.stylePresets, id, name));
+  });
+  ipcMain.handle('desktop:delete-style-preset', (event, id) => {
+    requireControlSender(event);
+    requireStylePresetIdle();
+    return commitStylePresetList(stylePresets.deleteStylePreset(appState.stylePresets, id));
+  });
+  ipcMain.handle('desktop:apply-style-preset', (event, id) => {
+    requireControlSender(event);
+    return applyStylePreset(id);
+  });
   ipcMain.handle('desktop:get-window-state', () => ({
+    sessionId: OUTPUT_SESSION_ID,
     appVersion: app.getVersion(),
+    controlAppearance: controlAppearanceSettings.normalize(appState.controlAppearance),
+    closeAction: getControlCloseAction(),
+    previewEnabled: (appState.settings || {}).previewEnabled !== false,
     clickThrough,
     overlayStatus,
+    playback: messagePlayback.getStats(),
     overlayAvailable: !!(overlayWindow && !overlayWindow.isDestroyed()),
     obsUrl: obsUrl(embeddedPort),
     // The control window initializes before the output is created.  Returning
@@ -982,7 +1421,26 @@ function bindIpc() {
     setOverlayAlwaysOnTop(enabled);
     return { alwaysOnTop: !!enabled };
   });
-  ipcMain.handle('desktop:resize-overlay', (_event, width, height) => resizeOverlay(width, height));
+  ipcMain.handle('desktop:set-preview-enabled', (event, enabled) => {
+    if (!controlWindow || controlWindow.isDestroyed() || event.sender !== controlWindow.webContents) {
+      throw new Error('Only the control window can change desktop preview visibility');
+    }
+    setPreviewEnabled(!!enabled);
+    return {
+      previewEnabled: (appState.settings || {}).previewEnabled !== false,
+      overlayAvailable: !!(overlayWindow && !overlayWindow.isDestroyed())
+    };
+  });
+  ipcMain.handle('desktop:set-close-action', (event, action) => {
+    if (!controlWindow || controlWindow.isDestroyed() || event.sender !== controlWindow.webContents) {
+      throw new Error('Only the control window can change its close action');
+    }
+    return setControlCloseAction(action);
+  });
+  ipcMain.handle('desktop:resize-overlay', (_event, width, height) => {
+    requireStylePresetIdle();
+    return resizeOverlay(width, height);
+  });
   ipcMain.handle('desktop:set-overlay-bounds', (event, bounds) => {
     if (!overlayWindow || overlayWindow.isDestroyed() || event.sender !== overlayWindow.webContents) return null;
     return setOverlayBounds(bounds);
@@ -991,14 +1449,26 @@ function bindIpc() {
     if (!overlayWindow || overlayWindow.isDestroyed() || event.sender !== overlayWindow.webContents) return;
     acceptPreviewViewport(viewport);
   });
-  ipcMain.handle('desktop:load-settings', () => withPreviewCanvas(
+  ipcMain.handle('desktop:load-settings', (event) => withPreviewCanvas(
     appState.settings,
-    roomConnectionRequested ? (appState.settings || {}).roomId : ''
+    roomConnectionRequested || (controlWindow && !controlWindow.isDestroyed() && event && event.sender === controlWindow.webContents)
+      ? (appState.settings || {}).roomId : ''
   ));
   ipcMain.handle('desktop:load-scene', () => sceneSnapshot());
   ipcMain.handle('desktop:save-settings', (_event, settings) => {
-    appState.settings = Object.assign({}, settings);
-    saveStateSoon();
+    requireStylePresetIdle();
+    const previous = appState.settings;
+    // Connection commands own the saved room. A delayed appearance save from
+    // an older controller snapshot must not restore a previous/empty room ID.
+    appState.settings = themes.migrateSettings(Object.assign({}, settings, {
+      roomId: String((appState.settings || {}).roomId || '')
+    }));
+    // Expiring SC is irreversible: commit the preference before applying it.
+    if (!saveStateNow()) {
+      appState.settings = previous;
+      throw new Error('设置保存失败，请检查磁盘空间后重试。');
+    }
+    syncScExpirySettings();
     setOverlayAlwaysOnTop(appState.settings.alwaysOnTop !== false);
     setOverlayResizableForSettings();
     sendTo(overlayWindow, 'desktop:settings-changed', withPreviewCanvas(
@@ -1010,16 +1480,29 @@ function bindIpc() {
     return true;
   });
   ipcMain.on('desktop:preview-settings', (_event, settings) => {
+    if (stylePresetApplying) return;
     const preview = withPreviewCanvas(
-      settings,
-      roomConnectionRequested ? String(settings && settings.roomId || '') : ''
+      themes.migrateSettings(settings),
+      roomConnectionRequested ? String((appState.settings || {}).roomId || '') : ''
     );
+    // Expiry belongs to each committed skin configuration. Visual drafts may
+    // preview that skin's appearance, but must not change its lifetime policy
+    // or irreversibly delete SC before save-settings/apply-style-preset commits.
+    const committedConfigs = (appState.settings || {}).themeConfigs || {};
+    for (const theme of themes.ids) {
+      preview.themeConfigs[theme].scNeverExpire = (committedConfigs[theme] || themes.defaults[theme]).scNeverExpire === true;
+    }
+    delete preview.scNeverExpire;
     sendTo(overlayWindow, 'desktop:settings-changed', preview);
     if (embedded && typeof embedded.publishDesktopOutput === 'function') {
       embedded.publishDesktopOutput('settings', Object.assign(outputState(), { settings: preview }));
     }
   });
   ipcMain.handle('desktop:connect-room', (_event, roomId) => connectDesktopRoom(roomId));
+  ipcMain.handle('desktop:disconnect-room', (event) => {
+    requireControlSender(event);
+    return disconnectDesktopRoom();
+  });
   ipcMain.on('desktop:overlay-ready', (event) => {
     if (!overlayWindow || overlayWindow.isDestroyed() || event.sender !== overlayWindow.webContents) return;
     sendTo(overlayWindow, 'desktop:settings-changed', withPreviewCanvas(
@@ -1032,31 +1515,19 @@ function bindIpc() {
     if (!overlayWindow || overlayWindow.isDestroyed() || event.sender !== overlayWindow.webContents) return false;
     return dismissSceneMessage(id);
   });
-  ipcMain.on('desktop:preview-messages', addPreviewMessages);
+  if (!app.isPackaged) ipcMain.on('desktop:preview-messages', addPreviewMessages);
   ipcMain.handle('desktop:copy-obs-url', () => {
     clipboard.writeText(obsUrl(embeddedPort));
     return true;
   });
   ipcMain.handle('desktop:reconnect-relay', () => {
     if (liveScene && roomConnectionRequested) {
-      clearScene();
+      clearScene('manual-reconnect');
       liveScene.reconnect().catch((error) => console.warn('[desktop] 重新连接失败:', error.message));
       return true;
     }
     return false;
   });
-  ipcMain.on('desktop:show-overlay', () => {
-    if (overlayHasConnected || sceneMessages.length) {
-      setPreviewEnabled(true);
-      setClickThrough(false);
-      const window = syncPreviewWindow();
-      if (window && !window.webContents.isLoadingMainFrame()) {
-        window.show();
-        window.focus();
-      }
-    }
-  });
-  ipcMain.on('desktop:reset-overlay-bounds', resetOverlayBounds);
   ipcMain.on('desktop:minimize', () => {
     if (controlWindow && !controlWindow.isDestroyed()) controlWindow.minimize();
   });
@@ -1079,9 +1550,16 @@ if (!hasLock) {
 
   app.whenReady().then(async () => {
     Menu.setApplicationMenu(null);
+    if (process.platform === 'win32' && typeof app.setAppUserModelId === 'function') {
+      app.setAppUserModelId('com.danmuhime.overlay');
+    }
     loadState();
     roomConnectionRequested = /^\d+$/.test(String((appState.settings || {}).roomId || '').trim());
     bindIpc();
+    const recoverAfterDisplayChange = () => scheduleOverlayBoundsRecovery(overlayWindow, 160);
+    screen.on('display-added', recoverAfterDisplayChange);
+    screen.on('display-removed', recoverAfterDisplayChange);
+    screen.on('display-metrics-changed', recoverAfterDisplayChange);
     const registered = globalShortcut.register(UNLOCK_SHORTCUT, toggleClickThrough);
     if (!registered) console.warn('[desktop] 全局快捷键注册失败: ' + UNLOCK_SHORTCUT);
     const port = await startEmbeddedServer();
@@ -1091,13 +1569,19 @@ if (!hasLock) {
       overlaySizeLocked: false
     }, appState.settings || {});
     embedded.setDesktopOutputBridge({
-      getState: outputState
+      getState: outputState,
+      onSubscribersChanged: (count) => messagePlayback.setActive(count > 0)
     });
+    initializeScAlerts();
     liveScene = createLiveScene({
       relay: embedded.relay,
       getRoomInfo: embedded.getRoomInfo,
       getRoomEmotes: embedded.getRoomEmotes,
-      onMessage: addSceneMessage,
+      onMessage: receiveLiveMessage,
+      onMessageUpdate: updateSceneMessage,
+      onMessageDelete: removeUpstreamSc,
+      onEntry: addWelcomeMessage,
+      onDiagnostic: recordScDiagnostic,
       onStatus: (status) => {
         if (!app.isQuitting) setReportedStatus(status);
       }
@@ -1122,9 +1606,11 @@ app.on('before-quit', () => {
   app.isQuitting = true;
   if (liveScene) liveScene.dispose();
   liveScene = null;
+  if (scAlerts) scAlerts.dispose();
+  scAlerts = null;
+  scExpiry.dispose();
+  messagePlayback.dispose();
   clearPreviewRuntime();
-  if (scenePublishTimer !== null) clearTimeout(scenePublishTimer);
-  scenePublishTimer = null;
   rememberBounds(controlWindow, 'controlBounds');
   rememberBounds(overlayWindow, 'overlayBounds');
   saveStateNow();

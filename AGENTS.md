@@ -9,3 +9,9 @@
 - 普通开发、讨论或试验不自动视为用户已确认版本。
 - 不把凭据、Cookie、本地用户状态、缓存、临时文件或构建产物提交到 Git。
 - 该约定涵盖 Git 提交、分支推送和版本标签，不自动创建 GitHub Release 或上传发布附件。
+
+## Electron 验证窗口
+
+- 离屏测试创建窗口前必须加载 `scripts/electron-test-windows.cjs`，并设置 `show: false`。禁止把 `offscreen: true` 的窗口显示到真实桌面，否则 Electron 会显示“No content under offscreen mode”占位文字。
+- 原生拖动和鼠标穿透必须用正常的临时窗口验证，不能用离屏窗口或 DOM `dispatchEvent` 代替 Windows 命中测试。用户停止电脑操作后立即停止输入。
+- 测试使用独立临时配置、模拟消息与临时端口；完成或失败时关闭所有临时窗口及子进程，不操作用户真实直播间和 OBS 状态。

@@ -3,7 +3,7 @@
 
   function normalizeUrl(value) {
     const source = value && typeof value === 'object' ? (value.url || value.src) : value;
-    const text = String(source || '').trim();
+    const text = typeof source === 'string' && source.length <= 2048 ? source.trim() : '';
     if (!text) return '';
     if (text.startsWith('//')) return 'https:' + text;
     if (/^http:\/\//i.test(text)) return text.replace(/^http:/i, 'https:');
@@ -13,7 +13,7 @@
   function readExtra(value) {
     if (!value) return null;
     if (typeof value === 'object') return value;
-    if (typeof value !== 'string' || value[0] !== '{') return null;
+    if (typeof value !== 'string' || value.length > 64 * 1024 || value[0] !== '{') return null;
     try {
       return JSON.parse(value);
     } catch (e) {

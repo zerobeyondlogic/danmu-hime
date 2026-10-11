@@ -1,25 +1,20 @@
-@font-face {
-  /* Layout-only proxy. Visible pixel glyphs come from the 16x16 BDF canvas. */
-  font-family: "GNU Unifont 16 Bitmap";
-  src: url("fonts/fusion-pixel-12px-monospaced-zh_hans.woff2") format("woff2");
-  font-style: normal;
-  font-weight: 400;
-  font-display: block;
-}
-
 :root {
   color-scheme: dark;
   --surface-opacity: 0.68;
   --surface-blur: 13.6px;
   --surface-saturation: 105.4%;
-  --surface-texture-opacity: 0.163;
-  --obs-canvas-width: 720px;
-  --obs-canvas-height: 900px;
+  --obs-canvas-width: 515px;
+  --obs-canvas-height: 650px;
   --stage-left: 0px;
   --stage-top: 0px;
   --stage-scale: 1;
   --ui-scale: 1;
+  --welcome-font-base: 18px;
+  --content-inset-inline: 8px;
+  --row-text-inset: 0px;
+  --row-time-inset: 56px;
   --message-font-base: 34px;
+  --emote-scale: 1;
   --name-font-base: 20px;
   --meta-font-base: 15px;
   --time-font-base: 12px;
@@ -27,6 +22,8 @@
   --gift-color: #e4a5b0;
   --time-color: #c9d0d8;
   --theme-font-family: "Segoe UI Variable Text";
+  --message-text-shadow: none;
+  --outline-frame-shadow: none;
   --row-min-base: 86px;
   --gift-row-min-base: 116px;
   --message-gap-base: 10px;
@@ -64,7 +61,12 @@ body {
 }
 
 .overlay-stage {
+  /* Keep a usable text/emote area on narrow canvases even when a skin saved
+     a large side inset. This uses the canonical canvas for identical OBS fit. */
+  --minimum-row-width: calc(var(--row-text-inset) + max(var(--row-time-inset), var(--row-text-inset)) + max(96px, calc(var(--message-font-base) * 2.15)));
+  --content-padding-inline: min(calc(var(--content-inset-inline) * var(--ui-scale)), max(0px, calc((var(--obs-canvas-width) - var(--minimum-row-width) * var(--ui-scale)) / 2)));
   position: absolute;
+  isolation: isolate;
   left: var(--stage-left);
   top: var(--stage-top);
   width: var(--obs-canvas-width);
@@ -74,11 +76,12 @@ body {
   background: transparent;
   transform: scale(var(--stage-scale));
   transform-origin: top left;
-  -webkit-app-region: drag;
+  -webkit-app-region: none;
 }
 
 .message-stack {
   position: relative;
+  z-index: 1;
   isolation: isolate;
   width: 100%;
   height: 100%;
@@ -114,9 +117,11 @@ body {
   min-height: 0;
   justify-content: flex-end;
   overflow: hidden;
+  -webkit-app-region: drag;
 }
 
-.message-stack::before {
+/* One continuous skin surface under the message stream. */
+.overlay-stage::before {
   content: "";
   position: absolute;
   inset: 0;
@@ -137,6 +142,7 @@ body {
   padding: calc(22px * var(--ui-scale));
   text-align: center;
   pointer-events: none;
+  -webkit-app-region: drag;
 }
 
 .empty-state[hidden] { display: none; }
@@ -160,19 +166,50 @@ body {
   width: 100%;
   min-height: calc(var(--row-min-base) * var(--ui-scale));
   flex: 0 0 auto;
-  padding: calc(13px * var(--ui-scale)) calc(72px * var(--ui-scale)) calc(13px * var(--ui-scale)) calc(17px * var(--ui-scale));
+  padding: calc(13px * var(--ui-scale)) calc(var(--row-time-inset) * var(--ui-scale)) calc(13px * var(--ui-scale)) 0;
   border: 0;
   animation: messageIn 190ms ease-out both;
   -webkit-app-region: drag;
 }
 
-body:not(.obs-output) .pinned-sc-stack .message-row.is-sc {
-  cursor: grab;
-  touch-action: pan-y;
-  -webkit-app-region: no-drag;
+.message-list > .message-row {
+  /* Shift the selected recent cards without collapsing hidden history or
+     sharing the transform used by message motion and SC gestures. */
+  top: var(--message-alignment-offset, 0px);
 }
 
-body:not(.obs-output) .pinned-sc-stack .message-row.is-sc:active { cursor: grabbing; }
+.message-list > .message-row.is-clipped {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+body:not(.obs-output) .message-row.is-pinned-sc {
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+/* Only pinned SC uses swipe gestures. Once returned to history, its card
+   follows the same native window-drag behavior as ordinary messages. */
+body:not(.obs-output) .pinned-sc-stack,
+body:not(.obs-output) .message-row.is-pinned-sc,
+body:not(.obs-output) .message-row.is-pinned-sc * {
+  -webkit-app-region: no-drag !important;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+body:not(.obs-output) .message-row.is-pinned-sc:active { cursor: grabbing; }
+
+.sc-hit-area {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  border-radius: inherit;
+  background: rgba(0, 0, 0, 0.004);
+  pointer-events: auto;
+  touch-action: none;
+}
 
 .pinned-sc-stack .message-row.is-swiping {
   animation: none !important;
@@ -190,7 +227,7 @@ body:not(.obs-output) .pinned-sc-stack .message-row.is-sc:active { cursor: grabb
 
 .message-avatar {
   position: absolute;
-  left: calc(17px * var(--ui-scale));
+  left: 0;
   top: 50%;
   z-index: 2;
   width: calc(48px * var(--ui-scale));
@@ -207,12 +244,6 @@ body:not(.obs-output) .pinned-sc-stack .message-row.is-sc:active { cursor: grabb
 }
 
 body.show-avatars .message-avatar { display: grid; }
-body.show-avatars .message-row { padding-left: calc(82px * var(--ui-scale)); }
-body.show-avatars .message-row.is-gift,
-body.show-avatars .message-row.is-sc {
-  padding-left: calc(82px * var(--ui-scale));
-  padding-right: calc(82px * var(--ui-scale));
-}
 
 .message-avatar-fallback {
   font-size: calc(18px * var(--ui-scale));
@@ -299,41 +330,47 @@ body.show-avatars .message-row.is-sc {
 }
 
 .emote-visual {
+  --emote-aspect: 1;
+  --emote-base: 1.62;
+  --emote-baseline: 0.34;
+  --emote-margin: 0.1em;
+  --emote-height: calc(var(--emote-base) * 1em * var(--emote-scale));
   position: relative;
   z-index: 2;
   display: inline-block;
-  margin: 0 0.1em;
-  vertical-align: -0.34em;
+  max-width: calc(100% - 2 * var(--emote-margin) * var(--emote-scale));
+  margin: 0 calc(var(--emote-margin) * var(--emote-scale));
+  vertical-align: calc(-1 * var(--emote-baseline) / var(--emote-base) * var(--emote-height));
   line-height: 0;
 }
 
 .emote-image {
   display: block;
   width: auto;
-  height: 1.62em;
+  max-width: 100%;
+  height: var(--emote-height);
+  aspect-ratio: var(--emote-aspect);
   object-fit: contain;
 }
 
-.emote-image.is-official {
-  height: 2.15em;
-}
-
 .emote-visual.is-official {
-  margin-inline: 0.14em;
-  vertical-align: -0.58em;
+  --emote-base: 2.15;
+  --emote-baseline: 0.58;
+  --emote-margin: 0.14em;
 }
 
-.emote-pixel-canvas {
-  position: absolute;
-  inset: 0;
-  display: none;
-  pointer-events: none;
-  image-rendering: pixelated;
+@supports (container-type: inline-size) {
+  /* Only emote-bearing bodies become size-query containers. Natural aspect
+     metadata is written once on image load; CSS handles later font/size edits. */
+  .message-body:has(.emote-visual) { container-type: inline-size; }
+  .emote-visual {
+    --emote-height: min(calc(var(--emote-base) * 1em * var(--emote-scale)), max(0px, calc((100cqi - 2 * var(--emote-margin) * var(--emote-scale)) / var(--emote-aspect))));
+  }
 }
 
 .message-time {
   position: absolute;
-  right: calc(16px * var(--ui-scale));
+  right: 0;
   bottom: calc(12px * var(--ui-scale));
   color: var(--time-color);
   font-family: var(--mono);
@@ -429,16 +466,17 @@ body[data-theme="glass"] .message-row {
 body[data-theme="glass"] .message-stack {
   padding:
     calc(10px * var(--ui-scale))
-    calc(28px * var(--ui-scale))
+    var(--content-padding-inline)
     calc(28px * var(--ui-scale));
-  border-radius: calc(10px * var(--ui-scale));
   background: transparent;
   box-shadow: none;
 }
 
-body[data-theme="glass"] .message-stack::before {
+body[data-theme="glass"] .overlay-stage { border-radius: calc(10px * var(--ui-scale)); }
+
+body[data-theme="glass"] .overlay-stage::before {
   border-radius: inherit;
-  background: #000;
+  background: var(--glass-surface-color, #000000);
   backdrop-filter: blur(var(--surface-blur)) saturate(var(--surface-saturation));
   -webkit-backdrop-filter: blur(var(--surface-blur)) saturate(var(--surface-saturation));
 }
@@ -453,114 +491,32 @@ body[data-theme="glass"] .message-row.is-sc .message-body {
   color: var(--gift-color);
 }
 
-/* Monochrome pixel matrix */
-body[data-theme="pixel"] {
-  --host: #f2b93b;
-  --manager: #f2b93b;
-  --governor: #f2b93b;
-  --admiral: #f2b93b;
-  --captain: #f2b93b;
-  --viewer: #f2b93b;
+/* Shadows belong to text leaves, never a containing name/header group. This
+   keeps each glyph at one shadow strength, including split welcome text. */
+body:is([data-theme="glass"], [data-theme="outline"]) :is(.message-meta, .identity-cluster, .welcome-body) { text-shadow: none; }
+body:is([data-theme="glass"], [data-theme="outline"]) :is(
+  .message-body, .user-name, .role-label, .medal-label, .gift-value, .message-time,
+  .message-avatar-fallback, .welcome-prefix, .welcome-name, .welcome-suffix,
+  .empty-state-title, .empty-state-hint
+) { text-shadow: var(--message-text-shadow); }
+
+/* Amber EL: native text with a small, static electroluminescent glow. */
+body[data-theme="el"] {
   --row-min-base: 82px;
-  --gift-row-min-base: 112px;
+  --gift-row-min-base: 110px;
+  font-family: var(--theme-font-family), "Cascadia Mono", "Microsoft YaHei UI", monospace;
 }
-
-body[data-theme="pixel"] .message-row {
-  padding-left: calc(8px * var(--ui-scale));
-  padding-right: calc(112px * var(--ui-scale));
-  border-radius: 0;
-  background: transparent;
-}
-
-body[data-theme="pixel"] .message-meta {
-  margin-bottom: calc(10px * var(--ui-scale));
-}
-
-body[data-theme="pixel"] .identity-cluster {
-  gap: calc(12px * var(--ui-scale));
-}
-
-body[data-theme="pixel"] .user-name {
-  flex: 0 0 auto;
-  overflow: visible;
-  text-overflow: clip;
-}
-
-body[data-theme="pixel"] .message-avatar {
-  border-color: #f2b93b;
-  border-radius: 0;
-  color: #f2b93b;
-  background: #0d0e0e;
-  image-rendering: pixelated;
-}
-body[data-theme="pixel"] .message-avatar img {
-  filter: grayscale(1) sepia(1) saturate(6) hue-rotate(354deg) contrast(1.35);
-}
-
-body[data-theme="pixel"] .message-stack {
-  padding:
-    calc(14px * var(--ui-scale))
-    calc(32px * var(--ui-scale))
-    calc(32px * var(--ui-scale));
-  background: transparent;
-}
-
-body[data-theme="pixel"] .message-stack::before { background: #0d0e0e; }
-
-body[data-theme="pixel"] .empty-state-title,
-body[data-theme="pixel"] .empty-state-hint {
-  color: #f2b93b;
-  font-family: var(--theme-font-family), sans-serif;
-  text-transform: uppercase;
-}
-
-body[data-theme="pixel"] .empty-state-hint { opacity: 0.58; }
-
-body[data-theme="pixel"] .pixel-source {
-  position: relative;
-  text-shadow: none !important;
-}
-
-body[data-theme="pixel"].pixel-font-ready .pixel-rendered .pixel-source {
-  color: transparent !important;
-}
-
-/* The generic pixel-source positioning must not pull the timestamp back into
-   normal flow; it remains anchored to the lower-right corner of its row. */
-body[data-theme="pixel"] .message-time {
-  position: absolute;
-  width: calc(92px * var(--ui-scale));
-  text-align: right;
-}
-
-.pixel-canvas {
-  position: absolute;
-  inset: 0;
-  z-index: 1;
-  display: none;
-  width: 100%;
-  height: 100%;
-  pointer-events: none;
-  image-rendering: pixelated;
-}
-
-body[data-theme="pixel"].pixel-font-ready .pixel-canvas { display: block; }
-
-body[data-theme="pixel"] .emote-image { visibility: hidden; }
-body[data-theme="pixel"] .emote-pixel-canvas { display: block; }
-
-body[data-theme="pixel"] .message-body,
-body[data-theme="pixel"] .user-name,
-body[data-theme="pixel"] .role-label,
-body[data-theme="pixel"] .medal-label,
-body[data-theme="pixel"] .gift-value,
-body[data-theme="pixel"] .message-time {
-  font-family: var(--theme-font-family), sans-serif;
-  font-weight: 400;
-  font-synthesis: none;
-  -webkit-font-smoothing: none;
-  text-rendering: optimizeSpeed;
-}
+body[data-theme="el"] .overlay-stage { border-radius: calc(7px * var(--ui-scale)); }
+body[data-theme="el"] .overlay-stage::before { background: #0e1110; }
+body[data-theme="el"] .message-stack { padding: calc(12px * var(--ui-scale)) var(--content-padding-inline) calc(24px * var(--ui-scale)); }
+body[data-theme="el"] .message-row { padding-top: calc(12px * var(--ui-scale)); padding-bottom: calc(14px * var(--ui-scale)); background: transparent; }
+body[data-theme="el"] .message-body { font-weight: 500; line-height: 1.34; letter-spacing: 0.012em; text-shadow: 0 0 3px color-mix(in srgb, currentColor 18%, transparent); }
+body[data-theme="el"] .user-name { font-weight: 500; text-shadow: 0 0 2px color-mix(in srgb, currentColor 14%, transparent); }
+body[data-theme="el"] .message-meta { margin-bottom: calc(8px * var(--ui-scale)); }
+body[data-theme="el"] .message-avatar { border: 0; border-radius: calc(5px * var(--ui-scale)); background: rgba(235, 191, 101, 0.07); }
+body[data-theme="el"] .message-time { font-family: var(--theme-font-family), var(--mono); }
+body[data-theme="el"] .role-label,
+body[data-theme="el"] .medal-label { color: var(--time-color); }
 
 /* OpenCode TUI */
 body[data-theme="tui"] {
@@ -576,13 +532,13 @@ body[data-theme="tui"] {
 }
 
 body[data-theme="tui"] .message-row {
-  padding: calc(15px * var(--ui-scale)) calc(72px * var(--ui-scale)) calc(14px * var(--ui-scale)) calc(18px * var(--ui-scale));
+  padding: calc(15px * var(--ui-scale)) calc(var(--row-time-inset) * var(--ui-scale)) calc(14px * var(--ui-scale)) 0;
   border-radius: 0;
   background: transparent;
 }
 
 body[data-theme="tui"] .message-avatar {
-  border-color: #4fa8f5;
+  border-color: transparent;
   border-radius: 2px;
   background: #080808;
 }
@@ -590,13 +546,13 @@ body[data-theme="tui"] .message-avatar {
 body[data-theme="tui"] .message-stack {
   padding:
     calc(9px * var(--ui-scale))
-    calc(27px * var(--ui-scale))
+    var(--content-padding-inline)
     calc(27px * var(--ui-scale));
   border-radius: 0;
   background: transparent;
 }
 
-body[data-theme="tui"] .message-stack::before {
+body[data-theme="tui"] .overlay-stage::before {
   border-radius: inherit;
   background: #080808;
 }
@@ -631,135 +587,590 @@ body[data-theme="tui"] .gift-value::first-letter { color: #4fa8f5; }
 body[data-theme="tui"] .message-row.is-gift .message-body,
 body[data-theme="tui"] .message-row.is-sc .message-body { color: var(--gift-color); }
 
-/* Risograph two-plate print */
-body[data-theme="risograph"] {
-  --host: #e95562;
-  --manager: #123b8f;
-  --governor: #e95562;
-  --admiral: #123b8f;
-  --captain: #123b8f;
-  --viewer: #123b8f;
-  --row-min-base: 92px;
-  --gift-row-min-base: 124px;
-  color: #123b8f;
-  font-family: var(--theme-font-family), "KaiTi", "STKaiti", var(--sans);
+/* Shared native-text layout for the lightweight designs. */
+body:is([data-theme="el"], [data-theme="outline"]) .message-meta {
+  flex-wrap: wrap;
+  column-gap: calc(10px * var(--ui-scale));
+  row-gap: calc(3px * var(--ui-scale));
 }
-
-body[data-theme="risograph"] .message-stack {
-  position: relative;
-  padding:
-    calc(12px * var(--ui-scale))
-    calc(30px * var(--ui-scale))
-    calc(30px * var(--ui-scale));
+body:is([data-theme="el"], [data-theme="outline"]) .identity-cluster {
+  max-width: 100%;
+  flex-wrap: wrap;
+  column-gap: calc(7px * var(--ui-scale));
+  row-gap: calc(2px * var(--ui-scale));
+}
+body:is([data-theme="el"], [data-theme="outline"]) .user-name { max-width: 100%; }
+/* Keep long badges and paid values inside the card on narrow canvases. */
+body:is([data-theme="el"], [data-theme="outline"]) :is(.role-label, .medal-label) {
+  max-width: 100%;
   overflow: hidden;
-  clip-path: none;
-  background: transparent;
-  box-shadow: none;
+  text-overflow: ellipsis;
 }
-
-body[data-theme="risograph"] .message-stack::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: 0;
-  opacity: var(--surface-opacity);
-  background-color: rgb(232, 221, 197);
-  background-image:
-    radial-gradient(circle at 18% 14%, rgba(137, 82, 57, 0.10), transparent 21%),
-    radial-gradient(circle, rgba(18, 59, 143, 0.28) 0 0.75px, transparent 1.05px),
-    radial-gradient(circle, rgba(233, 85, 98, 0.20) 0 0.65px, transparent 0.95px),
-    repeating-linear-gradient(96deg, rgba(84, 61, 42, 0.025) 0 1px, transparent 1px 8px);
-  background-position: 0 0, 0 0, 3px 2px, 0 0;
-  background-size: auto, 9px 9px, 13px 13px, 100% 7px;
-  box-shadow: inset 0 0 42px rgba(86, 61, 39, 0.12);
-  pointer-events: none;
+body:is([data-theme="el"], [data-theme="outline"]) .gift-value {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
-
-body[data-theme="risograph"] .message-stack::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: 3;
-  opacity: var(--surface-texture-opacity);
-  background-image:
-    repeating-linear-gradient(3deg, transparent 0 22px, rgba(71, 47, 31, 0.16) 23px, transparent 24px 51px),
-    radial-gradient(ellipse at 82% 68%, transparent 0 54%, rgba(255, 248, 224, 0.28) 55% 57%, transparent 60%);
-  mix-blend-mode: multiply;
-  pointer-events: none;
+body:is([data-theme="el"], [data-theme="outline"]) .medal-label { color: var(--time-color); }
+body:is([data-theme="el"], [data-theme="outline"]) .message-row:is(.is-gift, .is-sc) .message-body { color: var(--gift-color); }
+body:is([data-theme="el"], [data-theme="outline"]) .message-row:is(.is-gift, .is-sc) { padding-top: calc(22px * var(--ui-scale)); padding-bottom: calc(22px * var(--ui-scale)); }
+body:is([data-theme="el"], [data-theme="outline"]):not(.show-avatars) .message-row:is(.is-gift, .is-sc) {
+  padding-left: 0;
+  padding-right: 0;
+  padding-bottom: calc(34px * var(--ui-scale));
 }
+body:is([data-theme="el"], [data-theme="outline"]) .message-time { font-variant-numeric: tabular-nums; }
 
-body[data-theme="risograph"] .message-row {
-  z-index: 1;
-  padding: calc(15px * var(--ui-scale)) calc(72px * var(--ui-scale)) calc(15px * var(--ui-scale)) calc(20px * var(--ui-scale));
-  overflow: visible;
-  background: transparent;
-  box-shadow: none;
+/* Outline: open canvas and individual, softly rounded hairline cards. */
+body[data-theme="outline"] {
+  --outline-font-stack: var(--theme-font-family), YouYuan, "Microsoft YaHei UI", sans-serif;
+  --outline-inset: clamp(0px, calc((var(--obs-canvas-width) - 280px) / 20), 10px);
+  --row-text-inset: var(--outline-inset);
+  --row-time-inset: calc(56px + var(--outline-inset));
+  --row-min-base: 94px;
+  --gift-row-min-base: 126px;
+  font-family: var(--outline-font-stack);
+  /* YouYuan has no bold face; synthesized weight can hollow out glyphs. */
+  font-synthesis-weight: none;
 }
+body[data-theme="outline"].show-avatars { --row-text-inset: calc(65px + var(--outline-inset)); }
+body[data-theme="outline"] .message-stack { padding: calc(8px * var(--ui-scale)) var(--content-padding-inline) calc(20px * var(--ui-scale)); }
+body[data-theme="outline"] .message-row { padding: calc(14px * var(--ui-scale)) calc(var(--row-time-inset) * var(--ui-scale)) calc(16px * var(--ui-scale)) calc(var(--outline-inset) * var(--ui-scale)); border-radius: calc(11px * var(--ui-scale)); background: transparent; }
+body[data-theme="outline"] .message-row::before { content: ""; position: absolute; inset: calc(2px * var(--ui-scale)); z-index: -1; border: 1px solid #ffffff; border-radius: inherit; background: rgba(18, 25, 33, calc(var(--surface-opacity) * 0.4)); box-shadow: var(--outline-frame-shadow); pointer-events: none; }
+body[data-theme="outline"] .message-avatar { left: calc(var(--outline-inset) * var(--ui-scale)); border: 0; border-radius: calc(8px * var(--ui-scale)); background: rgba(220, 232, 240, 0.07); }
+body[data-theme="outline"] .message-time { right: calc(var(--outline-inset) * var(--ui-scale)); bottom: calc(11px * var(--ui-scale)); font-family: var(--outline-font-stack); }
+body[data-theme="outline"] .role-label { color: var(--viewer); }
+body[data-theme="outline"] :is(.role-label, .medal-label, .gift-value, .message-time) { font-weight: 500; }
+body[data-theme="outline"] .user-name { font-weight: 600; }
+body[data-theme="outline"] .message-meta { margin-bottom: calc(7px * var(--ui-scale)); }
+body[data-theme="outline"] .message-body { font-weight: 600; line-height: 1.36; }
+body[data-theme="outline"]:not(.show-avatars) .message-row:is(.is-gift, .is-sc) { padding-left: calc(var(--outline-inset) * var(--ui-scale)); padding-right: calc(var(--outline-inset) * var(--ui-scale)); }
 
-body[data-theme="risograph"] .message-avatar {
-  border: 2px solid #123b8f;
-  border-radius: 3px;
-  color: #123b8f;
-  background: #e8ddc5;
-  box-shadow: 2px 1px 0 #e95562;
-  transform: translateY(-50%) rotate(-1deg);
-}
-body[data-theme="risograph"] .message-avatar img {
-  filter: saturate(0.72) contrast(1.12);
-  mix-blend-mode: multiply;
-}
-
-body[data-theme="risograph"] .message-row.is-gift,
-body[data-theme="risograph"] .message-row.is-sc {
-  padding-top: calc(23px * var(--ui-scale));
-  padding-bottom: calc(23px * var(--ui-scale));
-}
-
-body[data-theme="risograph"] .user-name,
-body[data-theme="risograph"] .role-label,
-body[data-theme="risograph"] .medal-label,
-body[data-theme="risograph"] .gift-value,
-body[data-theme="risograph"] .message-body {
-  position: relative;
-  z-index: 1;
-  font-family: var(--theme-font-family), "KaiTi", var(--sans);
-}
-
-body[data-theme="risograph"] .message-time { position: absolute; z-index: 1; font-family: var(--theme-font-family), "KaiTi", var(--sans); }
-
-body[data-theme="risograph"] .user-name,
-body[data-theme="risograph"] .role-label {
-  color: var(--viewer);
-  text-shadow: 2px 1px 0 rgba(233, 85, 98, 0.78);
-}
-
-body[data-theme="risograph"] .message-time { color: var(--time-color); text-shadow: 1px 1px 0 rgba(233, 85, 98, 0.58); }
-
-body[data-theme="risograph"] .message-body { color: var(--body-color); font-weight: 750; text-shadow: 2px 1px 0 rgba(233, 85, 98, 0.78); }
-
-body[data-theme="risograph"] .message-row.role-host .user-name,
-body[data-theme="risograph"] .message-row.role-host .role-label,
-body[data-theme="risograph"] .gift-value {
-  color: #e95562;
-  text-shadow: -2px 1px 0 rgba(18, 59, 143, 0.72);
-}
-
-body[data-theme="risograph"] .message-row.is-gift .message-body,
-body[data-theme="risograph"] .message-row.is-sc .message-body {
-  color: var(--gift-color);
-  text-shadow: -2px 1px 0 rgba(18, 59, 143, 0.8);
-}
-
-body[data-theme="risograph"] .medal-label { color: #123b8f; text-shadow: 1px 0 0 rgba(233, 85, 98, 0.46); }
-body[data-theme="risograph"] .message-time { right: calc(14px * var(--ui-scale)); bottom: calc(10px * var(--ui-scale)); opacity: 0.86; }
-
-/* Keep avatar spacing authoritative after per-theme row padding rules. */
-body.show-avatars .message-row { padding-left: calc(82px * var(--ui-scale)); }
+/* The stack owns the only outer inset. Rows reserve space for their content,
+   keeping the avatar-to-text gap separate from the user's side padding. */
+body.show-avatars { --row-text-inset: 65px; }
+body.show-avatars .message-row { padding-left: calc(var(--row-text-inset) * var(--ui-scale)); }
 body.show-avatars .message-row.is-gift,
 body.show-avatars .message-row.is-sc {
-  padding-left: calc(82px * var(--ui-scale));
-  padding-right: calc(82px * var(--ui-scale));
+  padding-left: calc(var(--row-text-inset) * var(--ui-scale));
+  padding-right: calc(var(--row-text-inset) * var(--ui-scale));
 }
+
+/* Welcome messages share the same flow, width and history as ordinary chat.
+   Their compact sentence inherits the skin without adding a separate box. */
+body[data-theme] .message-row.is-welcome {
+  min-height: 0;
+  padding: calc(6px * var(--ui-scale)) 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+body[data-theme] .message-row.is-welcome::before,
+body[data-theme] .message-row.is-welcome::after { content: none; }
+body:not(.show-welcome) .message-row.is-welcome { display: none; }
+.welcome-body {
+  color: var(--welcome-text-color, var(--time-color));
+  font-size: calc(var(--welcome-font-base) * var(--ui-scale));
+  font-family: inherit;
+  font-weight: 400;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+.welcome-name { color: var(--welcome-name-color, var(--body-color)); font-weight: 600; }
+
+/* Portrait: the sender's image becomes a soft, readable per-message surface.
+   These image layers are mounted only for visible cards in this skin. */
+body[data-theme="portrait"] {
+  --portrait-inset: 16px;
+  --row-text-inset: var(--portrait-inset);
+  --row-time-inset: var(--portrait-inset);
+  --row-min-base: 132px;
+  --gift-row-min-base: 132px;
+}
+body[data-theme="portrait"].show-avatars { --row-text-inset: calc(65px + var(--portrait-inset)); }
+body[data-theme="portrait"] .overlay-stage::before { content: none; }
+body[data-theme="portrait"] .message-stack { padding: calc(8px * var(--ui-scale)) var(--content-padding-inline); }
+body[data-theme="portrait"] .message-row {
+  isolation: isolate;
+  overflow: hidden;
+  padding: calc(14px * var(--ui-scale)) calc(var(--portrait-inset) * var(--ui-scale)) calc(26px * var(--ui-scale)) calc(var(--row-text-inset) * var(--ui-scale));
+  border-radius: calc(8px * var(--ui-scale));
+  background: transparent;
+}
+body[data-theme="portrait"] .message-art {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  overflow: hidden;
+  border-radius: inherit;
+  background: #293237;
+  opacity: var(--surface-opacity);
+  pointer-events: none;
+}
+body[data-theme="portrait"] .message-art img {
+  position: absolute;
+  display: block;
+  opacity: 0;
+  pointer-events: none;
+}
+body[data-theme="portrait"] .message-art.has-image img { opacity: 1; }
+body[data-theme="portrait"] .message-art-wash {
+  inset: calc(-24px * var(--ui-scale));
+  width: calc(100% + 48px * var(--ui-scale));
+  height: calc(100% + 48px * var(--ui-scale));
+  object-fit: cover;
+  filter: blur(calc(18px * var(--ui-scale)));
+}
+body[data-theme="portrait"] .message-art-focus {
+  right: 0;
+  top: 0;
+  /* Width balances portrait size against cropping; the wash fills the card. */
+  width: var(--portrait-width, 48%);
+  height: 100%;
+  object-fit: cover;
+  object-position: center;
+  filter: blur(calc(1px * var(--ui-scale)));
+  /* Livehime uses Chromium 105, which still requires prefixed CSS masks. */
+  -webkit-mask-image: linear-gradient(90deg, transparent 0%, rgba(0, 0, 0, 0.5) 25%, #000 57%);
+  mask-image: linear-gradient(90deg, transparent 0%, rgba(0, 0, 0, 0.5) 25%, #000 57%);
+}
+body[data-theme="portrait"] .message-art::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, rgba(8, 15, 19, 0.54) 0%, rgba(8, 15, 19, 0.38) 40%, rgba(8, 15, 19, 0.15) 72%, rgba(8, 15, 19, 0.08) 100%);
+}
+body[data-theme="portrait"] .message-meta,
+body[data-theme="portrait"] .identity-cluster {
+  flex-wrap: wrap;
+  min-width: 0;
+  gap: calc(6px * var(--ui-scale)) calc(8px * var(--ui-scale));
+}
+body[data-theme="portrait"] .message-meta { margin-bottom: calc(5px * var(--ui-scale)); }
+body[data-theme="portrait"] .identity-cluster { max-width: 100%; }
+body[data-theme="portrait"] .user-name { max-width: 100%; font-weight: 650; }
+body[data-theme="portrait"] :is(.role-label, .medal-label, .gift-value) { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+body[data-theme="portrait"] .medal-label { color: var(--time-color); }
+body[data-theme="portrait"] .message-body { font-weight: 650; line-height: 1.32; }
+body[data-theme="portrait"] :is(.message-meta, .message-body, .welcome-body) { text-shadow: 0 1px 3px rgba(0, 0, 0, 0.32); }
+body[data-theme="portrait"] .message-time {
+  right: calc(var(--portrait-inset) * var(--ui-scale));
+  bottom: calc(10px * var(--ui-scale));
+  font-family: var(--theme-font-family), var(--sans);
+  font-variant-numeric: tabular-nums;
+  opacity: 0.78;
+  text-shadow:
+    0 0 calc(1px * var(--ui-scale)) rgba(0, 0, 0, 0.95),
+    0 calc(1px * var(--ui-scale)) calc(2px * var(--ui-scale)) rgba(0, 0, 0, 0.9),
+    0 calc(1px * var(--ui-scale)) calc(4px * var(--ui-scale)) rgba(0, 0, 0, 0.75);
+}
+body[data-theme="portrait"] .message-avatar {
+  left: calc(var(--portrait-inset) * var(--ui-scale));
+  border: 0;
+  background: rgba(255, 255, 255, 0.08);
+}
+body[data-theme="portrait"] .message-row:is(.is-gift, .is-sc) {
+  padding-top: calc(14px * var(--ui-scale));
+  padding-right: calc(var(--portrait-inset) * var(--ui-scale));
+  padding-bottom: calc(26px * var(--ui-scale));
+}
+body[data-theme="portrait"] .message-row:is(.is-gift, .is-sc) .message-meta { justify-content: flex-start; }
+body[data-theme="portrait"] .message-row:is(.is-gift, .is-sc) .message-body { color: var(--gift-color); text-align: left; }
+body[data-theme="portrait"] .message-row.is-gift .message-art-focus {
+  width: 58%;
+  padding: calc(6px * var(--ui-scale));
+  object-fit: contain;
+  object-position: center;
+  -webkit-mask-image: linear-gradient(90deg, transparent 0%, rgba(0, 0, 0, 0.5) 25%, #000 57%);
+  mask-image: linear-gradient(90deg, transparent 0%, rgba(0, 0, 0, 0.5) 25%, #000 57%);
+}
+body[data-theme="portrait"] .message-row.is-welcome {
+  min-height: calc(52px * var(--ui-scale));
+  padding: calc(12px * var(--ui-scale)) calc(var(--portrait-inset) * var(--ui-scale));
+  border-radius: calc(8px * var(--ui-scale));
+}
+body[data-theme="portrait"] .welcome-body { position: relative; }
+
+/* The four illustrated skins keep all of their decoration inside each row.
+   Grid tracks grow with badges, names and amounts rather than overlapping the
+   text, and the row's measured height includes the tail / ink / window frame. */
+body:is([data-theme="mecha"], [data-theme="comic"], [data-theme="manga"], [data-theme="win95"]) {
+  --row-text-inset: 16px;
+  --row-time-inset: 16px;
+  --row-min-base: 0px;
+  --gift-row-min-base: 0px;
+}
+body:is([data-theme="mecha"], [data-theme="comic"], [data-theme="manga"], [data-theme="win95"]) .overlay-stage::before { content: none; }
+body:is([data-theme="mecha"], [data-theme="comic"], [data-theme="manga"], [data-theme="win95"]) .overlay-stage {
+  /* Include the illustrated frame, avatar column and gap when limiting side
+     padding. A narrow canvas must still leave room for readable Chinese. */
+  --minimum-row-width: max(224px, calc(var(--message-font-base) * 2.15 + 120px));
+}
+body:is([data-theme="mecha"], [data-theme="comic"], [data-theme="manga"], [data-theme="win95"]) .message-stack {
+  padding: calc(8px * var(--ui-scale)) var(--content-padding-inline);
+}
+body:is([data-theme="mecha"], [data-theme="comic"], [data-theme="manga"], [data-theme="win95"]) .message-row {
+  isolation: isolate;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas: "meta" "body" "time";
+  column-gap: calc(12px * var(--ui-scale));
+  padding: calc(16px * var(--ui-scale));
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+body:is([data-theme="mecha"], [data-theme="comic"], [data-theme="manga"], [data-theme="win95"]).show-avatars .message-row {
+  grid-template-columns: calc(48px * var(--ui-scale)) minmax(0, 1fr);
+  grid-template-areas: "avatar meta" "avatar body" ". time";
+}
+body:is([data-theme="mecha"], [data-theme="comic"], [data-theme="manga"], [data-theme="win95"]) .message-avatar {
+  grid-area: avatar;
+  position: relative;
+  left: auto;
+  top: auto;
+  align-self: center;
+  width: calc(48px * var(--ui-scale));
+  height: calc(48px * var(--ui-scale));
+  transform: none;
+  border: 0;
+  background: transparent;
+}
+body:is([data-theme="mecha"], [data-theme="comic"], [data-theme="manga"], [data-theme="win95"]) .message-row .message-meta {
+  grid-area: meta;
+  min-width: 0;
+  max-width: 100%;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-start;
+  gap: calc(5px * var(--ui-scale)) calc(8px * var(--ui-scale));
+  margin: 0 0 calc(7px * var(--ui-scale));
+}
+body:is([data-theme="mecha"], [data-theme="comic"], [data-theme="manga"], [data-theme="win95"]) .identity-cluster {
+  min-width: 0;
+  max-width: 100%;
+  flex-wrap: wrap;
+  gap: calc(3px * var(--ui-scale)) calc(6px * var(--ui-scale));
+}
+body:is([data-theme="mecha"], [data-theme="comic"], [data-theme="manga"], [data-theme="win95"]) .user-name { max-width: 100%; font-weight: 750; }
+body:is([data-theme="mecha"], [data-theme="comic"], [data-theme="manga"], [data-theme="win95"]) :is(.role-label, .medal-label, .gift-value) {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+body:is([data-theme="mecha"], [data-theme="comic"], [data-theme="manga"], [data-theme="win95"]) .medal-label { color: var(--time-color); }
+body:is([data-theme="mecha"], [data-theme="comic"], [data-theme="manga"], [data-theme="win95"]) .message-row .message-body {
+  grid-area: body;
+  position: relative;
+  min-width: 0;
+  font-weight: 700;
+  line-height: 1.4;
+  text-align: left;
+}
+body:is([data-theme="mecha"], [data-theme="comic"], [data-theme="manga"], [data-theme="win95"]) .message-row:is(.is-gift, .is-sc) .message-body { color: var(--gift-color); }
+body:is([data-theme="mecha"], [data-theme="comic"], [data-theme="manga"], [data-theme="win95"]) .message-time {
+  grid-area: time;
+  position: relative;
+  right: auto;
+  bottom: auto;
+  justify-self: end;
+  margin-top: calc(6px * var(--ui-scale));
+  font-family: var(--theme-font-family), var(--sans);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.3;
+}
+body:is([data-theme="mecha"], [data-theme="comic"], [data-theme="manga"], [data-theme="win95"]) .message-row::before,
+body:is([data-theme="mecha"], [data-theme="comic"], [data-theme="manga"], [data-theme="win95"]) .message-row::after {
+  position: absolute;
+  z-index: -1;
+  opacity: var(--surface-opacity);
+  pointer-events: none;
+}
+body:is([data-theme="mecha"], [data-theme="comic"], [data-theme="manga"], [data-theme="win95"]) .message-row.is-welcome {
+  display: block;
+  padding: calc(13px * var(--ui-scale)) calc(16px * var(--ui-scale));
+}
+body:is([data-theme="mecha"], [data-theme="comic"], [data-theme="manga"], [data-theme="win95"]) .message-row.is-welcome::before,
+body:is([data-theme="mecha"], [data-theme="comic"], [data-theme="manga"], [data-theme="win95"]) .message-row.is-welcome::after { content: ""; }
+body:is([data-theme="mecha"], [data-theme="comic"], [data-theme="manga"], [data-theme="win95"]) .welcome-body { position: relative; font-weight: 600; }
+
+/* Mecha: a navy panel nested in a muted olive frame and yellow left armour.
+   The clipped polygons are decoration only; the SC hit target stays square. */
+body[data-theme="mecha"] .message-row,
+body[data-theme="mecha"] .message-row:is(.is-gift, .is-sc) {
+  padding: calc(17px * var(--ui-scale)) calc(27px * var(--ui-scale)) calc(13px * var(--ui-scale)) calc(28px * var(--ui-scale));
+}
+body[data-theme="mecha"] .message-row::before {
+  content: "";
+  inset: 0;
+  background: linear-gradient(90deg, #f7c83e 0 calc(14px * var(--ui-scale)), #65724c calc(14px * var(--ui-scale)));
+  clip-path: polygon(0 0, calc(100% - 15px * var(--ui-scale)) 0, 100% calc(15px * var(--ui-scale)), 100% calc(100% - 26px * var(--ui-scale)), calc(100% - 26px * var(--ui-scale)) 100%, calc(12px * var(--ui-scale)) 100%, 0 calc(100% - 12px * var(--ui-scale)));
+}
+body[data-theme="mecha"] .message-row::after {
+  content: "";
+  inset: calc(4px * var(--ui-scale)) calc(4px * var(--ui-scale)) calc(5px * var(--ui-scale)) calc(16px * var(--ui-scale));
+  background:
+    linear-gradient(#f7c83e, #f7c83e) right calc(7px * var(--ui-scale)) top calc(7px * var(--ui-scale)) / calc(12px * var(--ui-scale)) calc(3px * var(--ui-scale)) no-repeat,
+    linear-gradient(#f7c83e, #f7c83e) right calc(7px * var(--ui-scale)) top calc(7px * var(--ui-scale)) / calc(3px * var(--ui-scale)) calc(12px * var(--ui-scale)) no-repeat,
+    #1a2744;
+  clip-path: polygon(0 calc(5px * var(--ui-scale)), 15% calc(5px * var(--ui-scale)), calc(15% + 5px * var(--ui-scale)) 0, calc(100% - 12px * var(--ui-scale)) 0, 100% calc(12px * var(--ui-scale)), 100% calc(100% - 24px * var(--ui-scale)), calc(100% - 24px * var(--ui-scale)) 100%, 28% 100%, calc(28% - 5px * var(--ui-scale)) calc(100% - 4px * var(--ui-scale)), 0 calc(100% - 4px * var(--ui-scale)));
+}
+body[data-theme="mecha"] .message-avatar { border: calc(2px * var(--ui-scale)) solid rgba(207, 220, 241, var(--surface-opacity)); }
+body[data-theme="mecha"] .gift-value {
+  position: relative;
+  isolation: isolate;
+  padding: calc(3px * var(--ui-scale)) calc(8px * var(--ui-scale));
+  font-weight: 800;
+  letter-spacing: 0.025em;
+}
+body[data-theme="mecha"] .gift-value::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border: 1px solid #f7c83e;
+  background: #111d34;
+  opacity: var(--surface-opacity);
+  clip-path: polygon(5px 0, 100% 0, 100% calc(100% - 5px), calc(100% - 5px) 100%, 0 100%, 0 5px);
+}
+body[data-theme="mecha"] .message-row.is-welcome { padding: calc(13px * var(--ui-scale)) calc(27px * var(--ui-scale)) calc(13px * var(--ui-scale)) calc(28px * var(--ui-scale)); }
+body[data-theme="mecha"] .welcome-name { font-weight: 750; }
+
+/* Comic: one closed ink outline includes both rounded card and curved tail.
+   The SC view reuses exactly the same path with a yellow fill. */
+body[data-theme="comic"] .message-row,
+body[data-theme="comic"] .message-row:is(.is-gift, .is-sc) {
+  padding: calc(14px * var(--ui-scale)) calc(17px * var(--ui-scale)) calc(26px * var(--ui-scale));
+}
+body[data-theme="comic"] .message-row::before,
+body[data-theme="comic"] .message-row.is-welcome::before {
+  content: "";
+  inset: 0;
+  border-image: url("assets/comic-bubble.svg") 40 40 64 90 fill / calc(26px * var(--ui-scale)) calc(26px * var(--ui-scale)) calc(44px * var(--ui-scale)) calc(68px * var(--ui-scale)) / 0 stretch;
+}
+body[data-theme="comic"] .message-row.is-sc::before {
+  border-image-source: url("assets/comic-bubble.svg#sc");
+}
+body[data-theme="comic"] .message-row::after,
+body[data-theme="comic"] .message-row.is-welcome::after { content: none; }
+body[data-theme="comic"] .message-avatar { border: calc(2px * var(--ui-scale)) solid rgba(17, 17, 17, var(--surface-opacity)); }
+body[data-theme="comic"] .identity-cluster {
+  position: relative;
+  isolation: isolate;
+  padding: calc(4px * var(--ui-scale)) calc(10px * var(--ui-scale));
+}
+body[data-theme="comic"] .identity-cluster::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border: calc(2px * var(--ui-scale)) solid #101010;
+  border-radius: calc(3px * var(--ui-scale));
+  background: #2154e9;
+  opacity: var(--surface-opacity);
+  transform: skewX(-5deg);
+}
+body[data-theme="comic"] .identity-cluster .medal-label { color: var(--viewer); }
+body[data-theme="comic"] .message-row .message-body { font-weight: 800; line-height: 1.36; }
+body[data-theme="comic"] .gift-value {
+  position: relative;
+  isolation: isolate;
+  padding: calc(4px * var(--ui-scale)) calc(8px * var(--ui-scale));
+  font-weight: 800;
+}
+body[data-theme="comic"] .gift-value::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border: calc(2px * var(--ui-scale)) solid #111111;
+  border-radius: calc(3px * var(--ui-scale));
+  background: #ff6763;
+  opacity: var(--surface-opacity);
+}
+body[data-theme="comic"] .message-row.is-sc .gift-value::before { background: #fff4ad; }
+body[data-theme="comic"] .message-row.is-welcome { min-height: calc(64px * var(--ui-scale)); padding: calc(13px * var(--ui-scale)) calc(18px * var(--ui-scale)) calc(25px * var(--ui-scale)); }
+body[data-theme="comic"] .welcome-body { font-weight: 700; }
+
+/* Black-and-white dialogue A: one closed, lightly hand-drawn outline with a
+   curved tail. Names and amounts live inside the same white speech bubble.
+   Fixed SVG dimensions keep its nine-slice centre filled even on short rows. */
+body[data-theme="manga"] { font-synthesis: none; }
+body[data-theme="manga"] .message-row,
+body[data-theme="manga"] .message-row:is(.is-gift, .is-sc) {
+  min-height: calc(92px * var(--ui-scale));
+  padding: calc(16px * var(--ui-scale)) calc(19px * var(--ui-scale)) calc(32px * var(--ui-scale));
+}
+body[data-theme="manga"] .message-row::before,
+body[data-theme="manga"] .message-row.is-welcome::before {
+  content: "";
+  inset: 0;
+  border-image: url("assets/manga-dialogue.svg") 40 40 64 90 fill / calc(26px * var(--ui-scale)) calc(26px * var(--ui-scale)) calc(48px * var(--ui-scale)) calc(68px * var(--ui-scale)) / 0 stretch;
+}
+body[data-theme="manga"] .message-row::after,
+body[data-theme="manga"] .message-row.is-welcome::after { content: none; }
+body[data-theme="manga"] .message-row .message-meta {
+  align-self: center;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: calc(7px * var(--ui-scale));
+}
+body[data-theme="manga"] .identity-cluster { flex: 1 1 calc(70px * var(--ui-scale)); }
+body[data-theme="manga"] .gift-value {
+  flex: 0 1 auto;
+  margin-left: auto;
+  text-align: right;
+}
+body[data-theme="manga"].show-avatars .message-row {
+  grid-template-columns: calc(32px * var(--ui-scale)) minmax(0, 1fr);
+  grid-template-areas: "avatar meta" "body body" "time time";
+  column-gap: calc(7px * var(--ui-scale));
+}
+body[data-theme="manga"] .message-avatar {
+  width: calc(32px * var(--ui-scale));
+  height: calc(32px * var(--ui-scale));
+  margin-bottom: calc(5px * var(--ui-scale));
+  border-radius: 43% 47% 45% 49%;
+}
+body[data-theme="manga"] .user-name,
+body[data-theme="manga"] .role-label,
+body[data-theme="manga"] .medal-label,
+body[data-theme="manga"] .gift-value {
+  padding: 0;
+  font-weight: 400;
+}
+body[data-theme="manga"] .message-row .message-body,
+body[data-theme="manga"] .welcome-body {
+  padding: 0;
+  font-weight: 400;
+  line-height: 1.45;
+}
+body[data-theme="manga"] .welcome-name { font-weight: 400; }
+body[data-theme="manga"] .message-time { margin-top: calc(5px * var(--ui-scale)); }
+body[data-theme="manga"] .message-time,
+body[data-theme="manga"] .gift-value { font-family: var(--sans); }
+body[data-theme="manga"] .message-row.is-welcome {
+  min-height: calc(80px * var(--ui-scale));
+  padding: calc(18px * var(--ui-scale)) calc(20px * var(--ui-scale)) calc(35px * var(--ui-scale));
+}
+body[data-theme="manga"] .welcome-body { text-align: center; }
+
+/* Windows 95: raised grey chrome, a blue title and a recessed white text pane.
+   There are no pretend caption buttons; SC keeps its existing swipe action. */
+body[data-theme="win95"] .message-row,
+body[data-theme="win95"] .message-row:is(.is-gift, .is-sc) {
+  padding: calc(4px * var(--ui-scale));
+  grid-template-areas: "meta" "body" "time";
+  column-gap: 0;
+}
+body[data-theme="win95"].show-avatars .message-row {
+  grid-template-columns: calc(58px * var(--ui-scale)) minmax(0, 1fr);
+  grid-template-areas: "meta meta" "avatar body" "time time";
+}
+body[data-theme="win95"] .message-row::before {
+  content: "";
+  inset: 0;
+  border: calc(2px * var(--ui-scale)) solid;
+  border-color: #ffffff #404040 #404040 #ffffff;
+  box-shadow: inset calc(-1px * var(--ui-scale)) calc(-1px * var(--ui-scale)) #808080, inset calc(1px * var(--ui-scale)) calc(1px * var(--ui-scale)) #dfdfdf;
+  background: #c0c0c0;
+}
+body[data-theme="win95"] .message-row .message-meta {
+  position: relative;
+  isolation: isolate;
+  padding: calc(4px * var(--ui-scale)) calc(6px * var(--ui-scale));
+  margin-bottom: calc(5px * var(--ui-scale));
+  gap: calc(5px * var(--ui-scale)) calc(9px * var(--ui-scale));
+}
+body[data-theme="win95"] .message-meta::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: #000080;
+  opacity: var(--surface-opacity);
+}
+body[data-theme="win95"] .message-meta .medal-label { color: var(--viewer); }
+body[data-theme="win95"] .user-name { font-weight: 700; }
+body[data-theme="win95"] .gift-value {
+  position: relative;
+  isolation: isolate;
+  margin-left: auto;
+  padding: calc(2px * var(--ui-scale)) calc(5px * var(--ui-scale));
+  font-weight: 600;
+}
+body[data-theme="win95"] .gift-value::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: #c0c0c0;
+  border: 1px solid;
+  border-color: #ffffff #404040 #404040 #ffffff;
+  opacity: var(--surface-opacity);
+}
+body[data-theme="win95"] .message-row .message-body {
+  position: relative;
+  isolation: isolate;
+  margin: 0 calc(2px * var(--ui-scale));
+  padding: calc(11px * var(--ui-scale)) calc(10px * var(--ui-scale));
+  font-weight: 500;
+  line-height: 1.4;
+}
+body[data-theme="win95"] .message-body::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border: calc(2px * var(--ui-scale)) solid;
+  border-color: #808080 #ffffff #ffffff #808080;
+  background: #ffffff;
+  opacity: var(--surface-opacity);
+}
+body[data-theme="win95"] .message-avatar {
+  justify-self: center;
+  border-radius: 0;
+  border: calc(2px * var(--ui-scale)) solid;
+  border-color: rgba(128, 128, 128, var(--surface-opacity)) rgba(255, 255, 255, var(--surface-opacity)) rgba(255, 255, 255, var(--surface-opacity)) rgba(128, 128, 128, var(--surface-opacity));
+}
+body[data-theme="win95"] .message-avatar-fallback { color: var(--body-color); }
+body[data-theme="win95"] .message-time {
+  width: calc(100% - 4px * var(--ui-scale));
+  margin: calc(5px * var(--ui-scale)) calc(2px * var(--ui-scale)) 0;
+  padding: calc(3px * var(--ui-scale)) calc(5px * var(--ui-scale));
+  text-align: right;
+}
+body[data-theme="win95"] .message-time::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border: 1px solid;
+  border-color: #808080 #ffffff #ffffff #808080;
+  opacity: var(--surface-opacity);
+}
+body[data-theme="win95"] .message-row.is-welcome { padding: calc(8px * var(--ui-scale)); }
+body[data-theme="win95"] .welcome-body {
+  isolation: isolate;
+  padding: calc(5px * var(--ui-scale)) calc(7px * var(--ui-scale));
+  font-weight: 500;
+}
+body[data-theme="win95"] .welcome-body::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border: 1px solid;
+  border-color: #808080 #ffffff #ffffff #808080;
+  background: #ffffff;
+  opacity: var(--surface-opacity);
+}
+
+/* Hidden welcome rows must remain hidden after the illustrated grid rules. */
+body:not(.show-welcome) .message-row.is-welcome { display: none; }
 
 @media (prefers-reduced-motion: reduce) {
   .message-row,
@@ -767,8 +1178,8 @@ body.show-avatars .message-row.is-sc {
 }
 
 @keyframes messageIn {
-  from { opacity: 0; transform: translateY(7px); }
-  to { opacity: 1; transform: translateY(0); }
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 @keyframes toastIn {

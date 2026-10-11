@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="480" height="160" viewBox="0 0 480 160" preserveAspectRatio="none">
+  <view id="sc" viewBox="0 160 480 160"/>
+  <defs><path id="outline" d="M28 4H452C466 4 476 14 476 28V108C476 121 466 131 452 131H79C64 146 48 153 29 156C37 147 41 139 41 131H28C14 131 4 121 4 108V28C4 14 14 4 28 4Z"/></defs>
+  <g stroke="#101010" stroke-width="4.5" stroke-linejoin="round">
+    <use href="#outline" fill="#fff"/>
+    <use href="#outline" y="160" fill="#ffe033"/>
+  </g>
+</svg>

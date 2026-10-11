@@ -1,6 +1,6 @@
 {
   "name": "danmu-hime",
-  "version": "0.3.0",
+  "version": "0.8.19",
   "private": true,
   "description": "A transparent Bilibili live chat overlay for streamers",
   "license": "UNLICENSED",
@@ -11,8 +11,9 @@
   "main": "desktop/main.js",
   "scripts": {
     "desktop": "electron .",
-    "test": "node test/protocol.test.js && node test/relay.test.js && node test/emotes.test.js && node test/avatars.test.js && node test/pixel-font.test.js && node test/live-scene.test.js",
-    "check": "node --check server.js && node --check relay.js && node --check js/protocol.js && node --check js/emotes.js && node --check js/avatars.js && node --check js/pixel-font.js && node --check js/app.js && node --check js/effects.js && node --check desktop/main.js && node --check desktop/live-scene.js && node --check desktop/preload.js && node --check desktop/renderer.js && node --check desktop/overlay.js && node --check scripts/build-pixel-font.js",
+    "test:alignment": "node scripts/verify-overlay-alignment.cjs",
+    "test": "node test/server-reliability.test.js && node test/media-cache.test.js && node test/main-persistence.test.js && node test/control-renderer.test.js && node test/overlay-lifecycle.test.js && node test/sc-diagnostics.test.js && node test/control-appearance.test.js && node test/sc-expiry.test.js && node test/sc-theme-expiry.test.js && node test/message-playback.test.js && node test/desktop-output.test.js && node test/gift-images.test.js && node test/gift-events.test.js && node test/protocol.test.js && node test/relay.test.js && node test/emotes.test.js && node test/avatars.test.js && node test/themes.test.js && node test/live-scene.test.js && node test/welcome-messages.test.js && node test/window-bounds.test.js && node test/style-presets.test.js && node test/sc-alerts.test.js && node test/sc-actions.test.js && node test/electron-test-windows.test.js && node test/skin-fonts.test.js",
+    "check": "node --check desktop/media-cache.js && node --check desktop/sc-diagnostics.js && node --check desktop/control-appearance-settings.js && node --check desktop/control-appearance.js && node --check desktop/sc-expiry.js && node --check desktop/message-playback.js && node --check server.js && node --check relay.js && node --check js/gift-events.js && node --check js/protocol.js && node --check js/emotes.js && node --check js/avatars.js && node --check desktop/themes.js && node --check js/app.js && node --check js/effects.js && node --check desktop/gift-images.js && node --check desktop/main.js && node --check desktop/live-scene.js && node --check desktop/entry-events.js && node --check desktop/preload.js && node --check desktop/renderer.js && node --check desktop/overlay.js && node --check desktop/window-bounds.js && node --check desktop/guard-messages.js && node --check desktop/style-presets.js && node --check desktop/sc-alerts.js && node --check scripts/electron-test-windows.cjs && node --check desktop/skin-fonts.js",
     "dist": "electron-builder --win nsis --x64",
     "dist:portable": "electron-builder --win portable --x64"
   },

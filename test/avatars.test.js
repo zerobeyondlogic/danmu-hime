@@ -8,6 +8,9 @@ const avatars = globalThis.DanmuAvatars;
 assert.strictEqual(avatars.normalizeUrl('//i0.hdslb.com/a.jpg'), 'https://i0.hdslb.com/a.jpg');
 assert.strictEqual(avatars.normalizeUrl('http://i1.hdslb.com/b.jpg'), 'https://i1.hdslb.com/b.jpg');
 assert.strictEqual(avatars.normalizeUrl('javascript:alert(1)'), '');
+assert.strictEqual(avatars.normalizeUrl({ url: { toString() { throw new Error('must not coerce'); } } }), '');
+assert.strictEqual(avatars.normalizeUrl('https://i0.hdslb.com/' + 'a'.repeat(2048)), '');
+assert.strictEqual(avatars.extractDanmakuAvatar({ extra: '{' + ' '.repeat(70000) }, []), '');
 
 const info = [[]];
 info[0][15] = JSON.stringify({ user: { base: { face: '//i0.hdslb.com/danmaku.jpg' } } });

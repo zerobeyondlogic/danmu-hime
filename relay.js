@@ -10,31 +10,76 @@ const HEARTBEAT_INTERVAL = 10000;
 const HEARTBEAT_TIMEOUT = 35000;
 const MAX_WS_BUFFER = 32 * 1024 * 1024;
 const MAX_HANDSHAKE_BUFFER = 64 * 1024;
+const MAX_PENDING_CHUNKS = 4096;
 const MAX_REPLAY_COMMANDS = 48;
+const MAX_REPLAY_BYTES = 8 * 1024 * 1024;
+const MAX_LEGACY_OUTPUT_BUFFER = 1024 * 1024;
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36';
 
 function isReplayableCommand(obj) {
   const cmd = String(obj && obj.cmd || '').split(':')[0];
-  return cmd === 'DANMU_MSG' || cmd === 'SEND_GIFT' ||
+  return cmd === 'DANMU_MSG' || cmd === 'SEND_GIFT' || cmd === 'SEND_GIFT_V2' ||
     cmd === 'SUPER_CHAT_MESSAGE' || cmd === 'GUARD_BUY' ||
     cmd === 'USER_TOAST_MSG_V2';
 }
 
-function createCommandHistory(limit) {
+function createCommandHistory(limit, maxBytes = MAX_REPLAY_BYTES) {
   const items = [];
+  const itemBytes = [];
+  let retainedBytes = 0;
+  const deletedScIds = new Set();
   const maxItems = Math.max(1, Number(limit) || MAX_REPLAY_COMMANDS);
+  const scId = value => typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? String(value)
+    : typeof value === 'string' && /^\d{1,32}$/.test(value) ? value.replace(/^0+/, '') : '';
+  maxBytes = Number.isSafeInteger(maxBytes) && maxBytes > 0 ? maxBytes : MAX_REPLAY_BYTES;
+  function remove(index) {
+    retainedBytes -= itemBytes[index];
+    items.splice(index, 1);
+    itemBytes.splice(index, 1);
+  }
   return {
-    add(obj) {
+    add(obj, encodedBytes) {
+      const cmd = String(obj && obj.cmd || '').split(':')[0];
+      if (cmd === 'SUPER_CHAT_MESSAGE' && deletedScIds.has(scId(obj.data && obj.data.id))) return;
+      const removeIds = cmd === 'SUPER_CHAT_MESSAGE_DELETE' && obj.data && Array.isArray(obj.data.ids)
+        ? new Set(obj.data.ids.slice(0, 4096).map(scId).filter(Boolean))
+        : cmd === 'SUPER_CHAT_MESSAGE' && scId(obj.data && obj.data.id) ? new Set([scId(obj.data.id)]) : null;
+      if (removeIds) {
+        if (cmd === 'SUPER_CHAT_MESSAGE_DELETE') {
+          for (const id of removeIds) {
+            deletedScIds.delete(id);
+            deletedScIds.add(id);
+            if (deletedScIds.size > 4096) deletedScIds.delete(deletedScIds.values().next().value);
+          }
+        }
+        for (let index = items.length - 1; index >= 0; index--) {
+          const previous = items[index];
+          if (String(previous.cmd || '').split(':')[0] === 'SUPER_CHAT_MESSAGE' && removeIds.has(scId(previous.data && previous.data.id))) remove(index);
+        }
+      }
       if (!isReplayableCommand(obj)) return;
+      // Real relay arrivals pass their already-known wire byte count, avoiding
+      // an extra JSON serialization for desktop/OBS-only usage.
+      let bytes = encodedBytes;
+      if (!Number.isSafeInteger(bytes) || bytes < 0) {
+        try { bytes = Buffer.byteLength(JSON.stringify(obj)); } catch (_) { return; }
+      }
+      if (bytes > maxBytes) return;
       items.push(obj);
-      if (items.length > maxItems) items.splice(0, items.length - maxItems);
+      itemBytes.push(bytes);
+      retainedBytes += bytes;
+      while (items.length > maxItems || retainedBytes > maxBytes) remove(0);
     },
     clear() {
       items.length = 0;
+      itemBytes.length = 0;
+      retainedBytes = 0;
+      deletedScIds.clear();
     },
     snapshot() {
       return items.slice();
-    }
+    },
+    getStats: () => ({ size: items.length, bytes: retainedBytes })
   };
 }
 
@@ -204,6 +249,8 @@ function createRelay(server, deps) {
   const { getUserInfo, roomInfoFetcher, danmuInfoFetcher, getCookies } = deps;
   const connectTls = deps.connectTls || tls.connect;
   const parseFrames = deps.parseFrames || protocol.parseFrames;
+  const setTimer = deps.setTimer || setTimeout;
+  const clearTimer = deps.clearTimer || clearTimeout;
   const clients = new Set();
   const listeners = new Set();
   const commandHistory = createCommandHistory(MAX_REPLAY_COMMANDS);
@@ -217,6 +264,29 @@ function createRelay(server, deps) {
   let protoverIndex = 0;
   let connectionGeneration = 0;
 
+  function disconnectLegacyClient(client) {
+    clients.delete(client);
+    try { client.destroy(); } catch (_) {}
+  }
+
+  function writeLegacyClient(client, payload) {
+    if (client.destroyed || client.writableEnded || client.writableLength > MAX_LEGACY_OUTPUT_BUFFER) {
+      disconnectLegacyClient(client);
+      return false;
+    }
+    try {
+      client.write(payload);
+      if (client.writableLength > MAX_LEGACY_OUTPUT_BUFFER) {
+        disconnectLegacyClient(client);
+        return false;
+      }
+      return true;
+    } catch (_) {
+      disconnectLegacyClient(client);
+      return false;
+    }
+  }
+
   function broadcast(obj) {
     const event = { ...obj, room: biliRoom };
     for (const listener of listeners) {
@@ -229,9 +299,7 @@ function createRelay(server, deps) {
     if (clients.size === 0) return;
     const msg = wsServerFrame(JSON.stringify(obj));
     for (const c of clients) {
-      try {
-        c.write(msg);
-      } catch (e) {}
+      writeLegacyClient(c, msg);
     }
   }
 
@@ -245,8 +313,8 @@ function createRelay(server, deps) {
     const delay = Math.min(30000, 1000 * Math.pow(1.5, attempts));
     attempts += 1;
     setStatus('reconnect');
-    if (reconnectTimer) clearTimeout(reconnectTimer);
-    reconnectTimer = setTimeout(() => {
+    if (reconnectTimer) clearTimer(reconnectTimer);
+    reconnectTimer = setTimer(() => {
       reconnectTimer = null;
       runBilibili(generation);
     }, delay);
@@ -304,6 +372,10 @@ function createRelay(server, deps) {
     let failoverAdvanced = false;
     let lastInboundAt = Date.now();
     let queue = Promise.resolve();
+    const pendingChunks = new Map();
+    let pendingBytes = 0;
+    let nextChunkId = 0;
+    let authTimer = null;
 
     function stopHeart() {
       if (heartTimer) {
@@ -354,6 +426,8 @@ function createRelay(server, deps) {
           console.log('[relay] auth reply parse error:', e.message);
         }
         if (code === 0) {
+          if (authTimer !== null) clearTimer(authTimer);
+          authTimer = null;
           authenticated = true;
           attempts = 0;
           setStatus('open');
@@ -374,15 +448,30 @@ function createRelay(server, deps) {
           console.log('[relay] cmd parse error:', e.message);
         }
         if (obj) {
-          commandHistory.add(obj);
+          commandHistory.add(obj, f.body.byteLength);
           broadcast({ t: 'cmd', v: obj });
         }
       }
     }
 
     function enqueueChunk(chunk, socket, sendPacket) {
+      if (closing || generation !== connectionGeneration || bili !== socket || socket.destroyed) return;
+      if (pendingChunks.size >= MAX_PENDING_CHUNKS || pendingBytes + chunk.length > MAX_WS_BUFFER) {
+        console.log('[relay] pending decode queue exceeded safety limit');
+        socket.destroy();
+        return;
+      }
+      const chunkId = ++nextChunkId;
+      pendingChunks.set(chunkId, chunk);
+      pendingBytes += chunk.length;
       queue = queue
         .then(async () => {
+          // Pending promises retain small IDs, not message buffers. Closing a
+          // slow/stale socket releases its queued data immediately.
+          const chunk = pendingChunks.get(chunkId);
+          if (!chunk) return;
+          pendingChunks.delete(chunkId);
+          pendingBytes -= chunk.length;
           if (closing || generation !== connectionGeneration || bili !== socket || socket.destroyed) return;
           biliPacketBuf = Buffer.concat([biliPacketBuf, Buffer.from(chunk)]);
           if (biliPacketBuf.length > MAX_WS_BUFFER) throw new Error('Bilibili packet buffer exceeded safety limit');
@@ -421,6 +510,14 @@ function createRelay(server, deps) {
         socket.write(headers.join('\r\n') + '\r\n\r\n');
       });
       bili = socket;
+      // TCP/TLS, WebSocket upgrade and authentication can all otherwise wait
+      // forever before the normal authenticated heartbeat watchdog starts.
+      authTimer = setTimer(() => {
+        authTimer = null;
+        if (closing || generation !== connectionGeneration || bili !== socket || socket.destroyed || authenticated) return;
+        advanceFailover('auth-timeout');
+        socket.destroy();
+      }, HEARTBEAT_TIMEOUT);
       let upgraded = false;
       const sendPacket = (packet) => {
         if (bili === socket && socket.destroyed === false) {
@@ -489,6 +586,11 @@ function createRelay(server, deps) {
       });
 
       socket.on('close', () => {
+        if (authTimer !== null) clearTimer(authTimer);
+        authTimer = null;
+        pendingChunks.clear();
+        pendingBytes = 0;
+        biliPacketBuf = Buffer.alloc(0);
         stopHeart();
         if (bili === socket) bili = null;
         if (!closing && generation === connectionGeneration) {
@@ -507,7 +609,14 @@ function createRelay(server, deps) {
     }
 
     const selectedHost = hosts[hostIndex % hosts.length];
-    connectOnce(selectedHost.host, selectedHost.wss_port || 443, realId);
+    try {
+      connectOnce(selectedHost.host, selectedHost.wss_port || 443, realId);
+    } catch (error) {
+      if (closing || generation !== connectionGeneration) return;
+      console.warn('[relay] connection setup failed:', error.message);
+      advanceFailover('connect-error');
+      scheduleRetry(generation);
+    }
   }
 
   function connectRoom(wantRoom) {
@@ -528,7 +637,7 @@ function createRelay(server, deps) {
     biliRoom = null;
     commandHistory.clear();
     if (reconnectTimer) {
-      clearTimeout(reconnectTimer);
+      clearTimer(reconnectTimer);
       reconnectTimer = null;
     }
     stopBilibili();
@@ -544,7 +653,7 @@ function createRelay(server, deps) {
     connectionGeneration += 1;
     const generation = connectionGeneration;
     if (reconnectTimer) {
-      clearTimeout(reconnectTimer);
+      clearTimer(reconnectTimer);
       reconnectTimer = null;
     }
     stopBilibili();
@@ -574,32 +683,39 @@ function createRelay(server, deps) {
       socket.destroy();
       return;
     }
+    if (req.headers.origin) {
+      try {
+        if (new URL(req.headers.origin).origin !== new URL('http://' + req.headers.host).origin) {
+          socket.destroy();
+          return;
+        }
+      } catch (_) {
+        socket.destroy();
+        return;
+      }
+    }
     const key = req.headers['sec-websocket-key'];
     if (!key) {
       socket.destroy();
       return;
     }
     const accept = crypto.createHash('sha1').update(key + WS_GUID).digest('base64');
-    socket.write(
+    socket.on('close', () => clients.delete(socket));
+    socket.on('error', () => disconnectLegacyClient(socket));
+    if (!writeLegacyClient(socket,
       'HTTP/1.1 101 Switching Protocols\r\n' +
       'Upgrade: websocket\r\n' +
       'Connection: Upgrade\r\n' +
       'Sec-WebSocket-Accept: ' + accept + '\r\n\r\n'
-    );
+    )) return;
     clients.add(socket);
-    socket.on('close', () => {
-      clients.delete(socket);
-    });
-    socket.on('error', () => {
-      clients.delete(socket);
-    });
     socket.on('data', () => {});
     const want = url.searchParams.get('room');
     if (want) connectRoom(want);
-    socket.write(wsServerFrame(JSON.stringify({ t: 'status', v: status })));
+    if (!writeLegacyClient(socket, wsServerFrame(JSON.stringify({ t: 'status', v: status })))) return;
     if (want && want === biliRoom) {
       for (const command of commandHistory.snapshot()) {
-        socket.write(wsServerFrame(JSON.stringify({ t: 'cmd', v: command })));
+        if (!writeLegacyClient(socket, wsServerFrame(JSON.stringify({ t: 'cmd', v: command })))) return;
       }
     }
   });

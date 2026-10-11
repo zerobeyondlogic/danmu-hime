@@ -59,4 +59,31 @@ testOfficialSingleEmote();
 testNestedTextEmotesRemainSupported();
 testUnsafeImageUrlIsRejected();
 testRoomAliasesAreConservative();
+
+{
+  const root = { emots: { '[valid]': { url: 'https://i0.hdslb.com/valid.png' } } };
+  let nested = root;
+  for (let index = 0; index < 20000; index++) { nested.extra = {}; nested = nested.extra; }
+  nested.extra = root;
+  const result = emotes.extractDanmakuEmotes(root, [[], '[valid]']);
+  assert.strictEqual(result['[valid]'].url, 'https://i0.hdslb.com/valid.png');
+  assert.doesNotThrow(() => emotes.extractDanmakuEmotes({ extra: root }, []));
+  assert.deepStrictEqual(emotes.extractDanmakuEmotes({ extra: '{' + ' '.repeat(70000) }, []), {});
+}
+
+{
+  const map = JSON.parse('{"__proto__":{"url":"https://i0.hdslb.com/proto.png"},"constructor":{"url":"https://i0.hdslb.com/ctor.png"}}');
+  for (let index = 0; index < 5000; index++) map['[' + index + ']'] = { url: 'https://i0.hdslb.com/emote.png' };
+  const result = emotes.extractDanmakuEmotes({ emots: map }, []);
+  assert.strictEqual(Object.getPrototypeOf(result), Object.prototype);
+  assert.strictEqual(Object.hasOwn(result, 'constructor'), false);
+  assert.ok(Object.keys(result).length <= 64);
+  const aliases = emotes.buildRoomEmoteAliases(Array.from({ length: 5000 }, (_, index) => ({
+    emoji: String(index), unique: 'unique_' + index, url: 'https://i0.hdslb.com/emote.png'
+  })));
+  assert.ok(Object.keys(aliases).length <= 2048);
+  assert.ok(Object.keys(emotes.mergeRoomEmotes('[1]', map, aliases)).length <= 64);
+  assert.strictEqual(emotes.safeEmoteUrl('https://user:password@i0.hdslb.com/emote.png'), '');
+  assert.strictEqual(emotes.safeEmoteUrl('https://i0.hdslb.com/' + 'a'.repeat(2048)), '');
+}
 console.log('emotes tests passed');
