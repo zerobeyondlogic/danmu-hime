@@ -8,6 +8,14 @@ node_modules/
 /data/
 /desktop-state.json
 
+# Local collaboration notes and design working material
+AGENTS.md
+/.codex/
+/docs/AUDIT-*.md
+/docs/MEMORY-AUDIT-*.md
+/docs/ui-style-guide.md
+/docs/ui-style-references/
+
 # Temporary files and logs
 /tmp/
 *.log
