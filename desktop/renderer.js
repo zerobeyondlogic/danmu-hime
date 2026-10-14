@@ -20,6 +20,7 @@
   const AVATAR_TEXT_WIDTH_COST = themeRegistry.avatarWidthCosts;
   const THEME_CONFIG_VERSION = themeRegistry.configVersion;
   const DEFAULT_THEME_CONFIGS = themeRegistry.defaults;
+  const EXTRA_COLOR_KEYS = [...new Set(Object.values(themeRegistry.extraColorKeys).flat())];
 
   let settings = {
     roomId: '',
@@ -170,17 +171,7 @@
     dialog.addEventListener('keydown', (event) => {
       // Keep Tab within the dialog, including when an underlying editor is open.
       event.stopPropagation();
-      if (event.key !== 'Tab') return;
-      const controls = Array.from(dialog.querySelectorAll('button, input')).filter((control) => control.getClientRects().length && !control.disabled);
-      const first = controls[0];
-      const last = controls[controls.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
+      cycleDialogFocus(event, dialog);
     });
     byId('controlCloseTrayButton').addEventListener('click', () => finishControlCloseDialog('tray'));
     byId('controlCloseQuitButton').addEventListener('click', () => finishControlCloseDialog('quit'));
@@ -246,17 +237,7 @@
     });
     dialog.addEventListener('keydown', (event) => {
       event.stopPropagation();
-      if (event.key !== 'Tab') return;
-      const controls = Array.from(dialog.querySelectorAll('button, input, select')).filter((control) => !control.disabled && control.getClientRects().length);
-      const first = controls[0];
-      const last = controls[controls.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
+      cycleDialogFocus(event, dialog);
     });
   }
 
@@ -754,11 +735,7 @@
       if (event.key === 'Enter' && event.target.id === 'stylePresetNameInput') {
         event.preventDefault(); confirmStylePreset();
       }
-      if (event.key !== 'Tab') return;
-      const controls = Array.from(dialog.querySelectorAll('button, input')).filter((control) => !control.disabled && control.getClientRects().length);
-      const first = controls[0], last = controls[controls.length - 1];
-      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
-      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+      cycleDialogFocus(event, dialog);
     });
   }
 
@@ -816,6 +793,12 @@
       ? '在左侧另加小头像，背景图片不受影响'
       : '开启时扩大文字宽度；关闭后缩回原宽度';
     els.themeWelcomeInput.checked = config.showWelcome !== false;
+    els.welcomeModeInput.value = config.welcomeMode;
+    els.welcomeModeInput.disabled = !els.themeWelcomeInput.checked;
+    els.welcomeDurationField.classList.toggle('hidden', config.welcomeMode !== 'single');
+    els.welcomeDurationInput.disabled = !els.themeWelcomeInput.checked || config.welcomeMode !== 'single';
+    els.welcomeDurationInput.value = String(config.welcomeDuration);
+    els.welcomeDurationValue.textContent = config.welcomeDuration + ' 秒';
     els.welcomeFontInput.value = String(config.welcomeFont);
     els.welcomeFontInput.disabled = !els.themeWelcomeInput.checked;
     els.welcomeFontInput.parentElement.classList.toggle('is-disabled', els.welcomeFontInput.disabled);
@@ -827,6 +810,12 @@
     els.bodyColorInput.value = config.bodyColor;
     els.giftColorInput.value = config.giftColor;
     els.timeColorInput.value = config.timeColor;
+    for (const property of EXTRA_COLOR_KEYS) {
+      const visible = (themeRegistry.extraColorKeys[editingTheme] || []).includes(property);
+      els[property + 'Field'].classList.toggle('hidden', !visible);
+      els[property + 'Input'].disabled = !visible;
+      els[property + 'Input'].value = config[property] || '#000000';
+    }
     els.fontFamilyInput.value = config.fontFamily;
     els.viewerColorInput.value = config.viewerColor;
     els.hostColorInput.value = config.hostColor;
@@ -865,6 +854,20 @@
     themeEditorFocus = null;
   }
 
+  function cycleDialogFocus(event, dialog) {
+    if (event.key !== 'Tab') return;
+    const controls = Array.from(dialog.querySelectorAll('button, input, select')).filter(
+      control => !control.disabled && control.tabIndex !== -1 && control.getClientRects().length
+    );
+    if (!controls.length) return;
+    const first = controls[0], last = controls[controls.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault(); last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault(); first.focus();
+    }
+  }
+
   function bindSheetKeyboard(dialog, close) {
     dialog.addEventListener('keydown', (event) => {
       if (event.key === 'Escape') {
@@ -873,17 +876,7 @@
         close();
         return;
       }
-      if (event.key !== 'Tab') return;
-      const controls = Array.from(dialog.querySelectorAll('button, input, select')).filter(
-        control => !control.disabled && control.tabIndex !== -1 && control.getClientRects().length
-      );
-      if (!controls.length) return;
-      const first = controls[0], last = controls[controls.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault(); last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault(); first.focus();
-      }
+      cycleDialogFocus(event, dialog);
     });
   }
 
@@ -1171,6 +1164,16 @@
       if (els.welcomeFontInput.disabled) return;
       updateThemeMetric('welcomeFont', els.welcomeFontInput.value, true);
     });
+    els.welcomeModeInput.addEventListener('change', () => {
+      if (els.welcomeModeInput.disabled) return;
+      settings.themeConfigs[editingTheme].welcomeMode = els.welcomeModeInput.value === 'single' ? 'single' : 'scroll';
+      updateThemeEditorValues();
+      scheduleSave();
+    });
+    els.welcomeDurationInput.addEventListener('input', () => {
+      if (els.welcomeDurationInput.disabled) return;
+      updateThemeMetric('welcomeDuration', els.welcomeDurationInput.value, false);
+    });
     els.bodyColorInput.addEventListener('input', () => {
       settings.themeConfigs[editingTheme].bodyColor = els.bodyColorInput.value;
       scheduleSave();
@@ -1190,11 +1193,13 @@
     });
     [
       ['welcomeTextColorInput', 'welcomeTextColor'], ['welcomeNameColorInput', 'welcomeNameColor'],
+      ...EXTRA_COLOR_KEYS.map(property => [property + 'Input', property]),
       ['viewerColorInput', 'viewerColor'], ['hostColorInput', 'hostColor'],
       ['managerColorInput', 'managerColor'], ['governorColorInput', 'governorColor'],
       ['admiralColorInput', 'admiralColor'], ['captainColorInput', 'captainColor']
     ].forEach(([id, property]) => {
       els[id].addEventListener('input', () => {
+        if (els[id].disabled) return;
         settings.themeConfigs[editingTheme][property] = els[id].value;
         scheduleSave();
       });
@@ -1289,6 +1294,8 @@
       'themeScaleValue', 'messageGapInput', 'messageGapValue', 'horizontalPaddingInput', 'horizontalPaddingValue', 'fontFamilyInput',
       'themeAvatarInput', 'fullCardsOnlyInput', 'messageAlignInput', 'themeWelcomeInput', 'welcomeFontInput', 'welcomeFontValue',
       'welcomeTextColorInput', 'welcomeNameColorInput',
+      'welcomeModeInput', 'welcomeDurationField', 'welcomeDurationInput', 'welcomeDurationValue',
+      ...EXTRA_COLOR_KEYS.flatMap(property => [property + 'Field', property + 'Input']),
       'messageFontInput', 'messageFontValue', 'nameFontInput',
       'nameFontValue', 'metaFontInput', 'metaFontValue', 'timeFontInput',
       'timeFontValue', 'themeOpacityInput', 'themeOpacityValue', 'glassSurfaceColorField', 'surfaceColorInput', 'bodyColorInput',

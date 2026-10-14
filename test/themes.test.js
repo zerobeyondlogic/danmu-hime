@@ -562,4 +562,38 @@ test('message alignment is independent per skin, defaults to bottom and rejects 
   assert.deepStrictEqual(themes.migrateSettings(plain(settings)), settings);
 });
 
+test('welcome mode and duration are per skin, with scroll and three seconds as legacy defaults', () => {
+  for (const theme of themes.ids) {
+    const previous = { ...themes.defaults[theme] }; delete previous.welcomeMode; delete previous.welcomeDuration;
+    const legacy = themes.normalizePresetThemeConfig(theme, previous).config;
+    assert.strictEqual(legacy.welcomeMode, 'scroll'); assert.strictEqual(legacy.welcomeDuration, 3);
+    for (const welcomeMode of ['single', 'scroll']) {
+      const config = themes.normalizePresetThemeConfig(theme, { ...previous, welcomeMode, welcomeDuration: 8 }).config;
+      assert.strictEqual(config.welcomeMode, welcomeMode); assert.strictEqual(config.welcomeDuration, 8);
+    }
+    for (const welcomeMode of [null, 1, 'invalid']) assert.throws(() => themes.normalizePresetThemeConfig(theme, { ...previous, welcomeMode }), /欢迎显示/);
+    assert.strictEqual(themes.normalizeConfig(theme, { welcomeDuration: 0 }).welcomeDuration, 1);
+    assert.strictEqual(themes.normalizeConfig(theme, { welcomeDuration: 100 }).welcomeDuration, 30);
+  }
+});
+
+test('extra text colors migrate with the original palette and stay scoped to their skins', () => {
+  const original = { medalColor: '#eceff4', thoughtColor: '#f1a431', giftValueColor: '#a8a5a3', giftMarkerColor: '#4fa8f5' };
+  for (const theme of themes.ids) {
+    const legacy = { ...themes.defaults[theme] };
+    for (const key of Object.keys(original)) delete legacy[key];
+    const keys = theme === 'tui' ? Object.keys(original) : theme === 'glass' ? ['medalColor'] : [];
+    const config = themes.normalizePresetThemeConfig(theme, legacy).config;
+    for (const key of keys) {
+      assert.strictEqual(config[key], original[key]);
+      assert.strictEqual(themes.normalizeConfig(theme, { ...legacy, [key]: '#ABCDEF' })[key], '#abcdef');
+      assert.strictEqual(themes.normalizeConfig(theme, { ...legacy, [key]: 'red' })[key], original[key]);
+      assert.throws(() => themes.normalizePresetThemeConfig(theme, { ...legacy, [key]: 'red' }), /无效/);
+    }
+    const normalized = themes.normalizeConfig(theme, { ...legacy, ...original });
+    for (const key of Object.keys(original).filter(key => !keys.includes(key))) assert.strictEqual(Object.hasOwn(normalized, key), false);
+    assert.deepStrictEqual(themes.normalizeConfig(theme, config), config);
+  }
+});
+
 console.log('Theme registry tests passed: ' + passed);

@@ -23,15 +23,19 @@
   const numberLimits = {
     overallScale: [60, 140], messageGap: [0, 20], horizontalPadding: [0, 64],
     messageFont: [16, 48], nameFont: [10, 30], metaFont: [8, 24], timeFont: [9, 22],
-    surfaceOpacity: [0, 100], welcomeFont: [12, 48], emoteScale: [50, 200], baseWidth: [240, 7680], baseHeight: [160, 4320]
+    surfaceOpacity: [0, 100], welcomeFont: [12, 48], welcomeDuration: [1, 30], emoteScale: [50, 200], baseWidth: [240, 7680], baseHeight: [160, 4320]
   };
   const colorKeys = [
     'bodyColor', 'giftColor', 'timeColor', 'viewerColor', 'hostColor', 'managerColor',
     'governorColor', 'admiralColor', 'captainColor', 'welcomeTextColor', 'welcomeNameColor'
   ];
+  const extraColorKeys = Object.freeze({
+    glass: Object.freeze(['medalColor']),
+    tui: Object.freeze(['medalColor', 'thoughtColor', 'giftValueColor', 'giftMarkerColor'])
+  });
   const common = {
     overallScale: 100, horizontalPadding: 8, showWelcome: true, welcomeFont: 18, baseWidth: 515, baseHeight: 650,
-    scNeverExpire: false, emoteScale: 100, fullCardsOnly: true, messageAlign: 'bottom'
+    scNeverExpire: false, emoteScale: 100, fullCardsOnly: true, messageAlign: 'bottom', welcomeMode: 'scroll', welcomeDuration: 3
   };
   const defaults = {
     glass: {
@@ -39,7 +43,8 @@
       fontFamily: 'Microsoft YaHei UI', bodyColor: '#fcfcfd', giftColor: '#e4a5b0', timeColor: '#c9d0d8',
       viewerColor: '#e7e9ed', hostColor: '#e99aa9', managerColor: '#72bfe7', governorColor: '#ef817c',
       admiralColor: '#c59ad8', captainColor: '#80cbe5', surfaceOpacity: 28, surfaceColor: '#000000',
-      showAvatar: true, welcomeTextColor: '#c9d0d8', welcomeNameColor: '#fcfcfd', shadowStrength: 60
+      showAvatar: true, welcomeTextColor: '#c9d0d8', welcomeNameColor: '#fcfcfd', shadowStrength: 60,
+      medalColor: '#eceff4'
     },
     el: {
       ...common, messageGap: 6, messageFont: 26, nameFont: 16, metaFont: 12, timeFont: 12,
@@ -53,7 +58,8 @@
       fontFamily: 'JetBrains Maple Mono', bodyColor: '#f3f1ee', giftColor: '#ee9ba2', timeColor: '#a8a5a3',
       viewerColor: '#f3f1ee', hostColor: '#ee8d96', managerColor: '#4fa8f5', governorColor: '#ef766f',
       admiralColor: '#c98bd2', captainColor: '#58b9e6', surfaceOpacity: 70, showAvatar: false,
-      welcomeTextColor: '#a8a5a3', welcomeNameColor: '#f3f1ee'
+      welcomeTextColor: '#a8a5a3', welcomeNameColor: '#f3f1ee',
+      medalColor: '#eceff4', thoughtColor: '#f1a431', giftValueColor: '#a8a5a3', giftMarkerColor: '#4fa8f5'
     },
     outline: {
       ...common, messageGap: 8, messageFont: 26, nameFont: 16, metaFont: 12, timeFont: 12,
@@ -152,7 +158,7 @@
     Object.entries(numberLimits).forEach(([key, range]) => {
       // Presets saved before welcome messages had an independent font size
       // remain valid; an explicitly invalid value still fails strict validation.
-      const value = (key === 'welcomeFont' || key === 'emoteScale') && given[key] === undefined ? fallback[key] : given[key];
+      const value = (key === 'welcomeFont' || key === 'welcomeDuration' || key === 'emoteScale') && given[key] === undefined ? fallback[key] : given[key];
       config[key] = numberValue(value, range, fallback[key], strict, key);
       if (key === 'emoteScale' && strict && Number(value) !== config[key]) throw new Error('预设中的表情大小须为 50–200。');
     });
@@ -183,6 +189,9 @@
       config.surfaceColor = colorValue(given.surfaceColor === undefined ? fallback.surfaceColor : given.surfaceColor,
         fallback.surfaceColor, strict, '承载面颜色');
     }
+    (extraColorKeys[id] || []).forEach(key => {
+      config[key] = colorValue(given[key] === undefined ? fallback[key] : given[key], fallback[key], strict, key);
+    });
     ['showAvatar', 'showWelcome'].forEach((key) => {
       if (typeof given[key] === 'boolean') config[key] = given[key];
       else if (strict) throw new Error('预设显示选项无效。');
@@ -200,6 +209,10 @@
     else if (given.messageAlign === 'top' || given.messageAlign === 'bottom') config.messageAlign = given.messageAlign;
     else if (strict) throw new Error('预设弹幕对齐方式无效。');
     else config.messageAlign = 'bottom';
+    if (given.welcomeMode === undefined) config.welcomeMode = 'scroll';
+    else if (given.welcomeMode === 'single' || given.welcomeMode === 'scroll') config.welcomeMode = given.welcomeMode;
+    else if (strict) throw new Error('预设欢迎显示方式无效。');
+    else config.welcomeMode = 'scroll';
     const font = given.fontFamily;
     if (typeof font === 'string' && font.trim() && font.length <= 120 && !/[\u0000-\u001f\u007f]/.test(font)) {
       // Older presets may explicitly reference the removed bundled glyph set.
@@ -249,7 +262,7 @@
   }
 
   return Object.freeze({
-    ids, names, defaults, avatarWidthCosts, configVersion,
+    ids, names, defaults, avatarWidthCosts, configVersion, extraColorKeys,
     resolveTheme, isKnownTheme, normalizeConfig, normalizeConfigs, migrateSettings, normalizePresetThemeConfig
   });
 });

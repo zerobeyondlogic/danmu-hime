@@ -16,7 +16,7 @@ function harness() {
   let at = 100000, nextTimer = 0, calls = 0, removed = 0, aborted = 0;
   let mode = 'success';
   const timers = new Map();
-  const document = { readyState: 'loading', documentElement: { dataset: {} }, fonts: new Set(), addEventListener() {} };
+  const document = { readyState: 'loading', documentElement: { dataset: {} }, body: { classList: { toggle() {} } }, fonts: new Set(), addEventListener() {} };
   const window = { location: { search: '?mode=obs' }, DanmuThemes: themes, DanmuSkinFonts: skinFonts,
     DanmuAvatars: avatars, matchMedia: () => ({ matches: false }) };
   const context = { window, document, URL, URLSearchParams, AbortController, console,
@@ -37,6 +37,15 @@ function harness() {
   };
   const hook = `
     window.audit = { lookup: lookupAvatar, art: artAvatarUrl,
+      fixed(value, overrides = {}) {
+        settings = themeRegistry.migrateSettings({ theme: 'glass', themeConfigs: { glass: { welcomeMode: 'single', ...overrides } } });
+        if (!els.fixedWelcome) els.fixedWelcome = { firstElementChild: null, replaceChildren(row) { this.firstElementChild = row || null; } };
+        makeMessageRow = () => ({ classList: { remove() {} }, dataset: {} });
+        syncMessageArt = () => {};
+        latestWelcome = value;
+        syncFixedWelcome();
+      },
+      fixedVisible: () => !!els.fixedWelcome?.firstElementChild,
       stop: stopAvatars, cache: cacheAvatarUrl, clear: clearDisplayedScene,
       revision(value) { if (value !== undefined) renderedSceneRevision = value; return renderedSceneRevision; },
       setup(row) { settings = themeRegistry.migrateSettings(settings);
@@ -47,7 +56,7 @@ function harness() {
   vm.runInNewContext(source.replace("  if (document.readyState === 'loading') {", hook + "  if (document.readyState === 'loading') {"), context);
   const api = window.audit;
   api.setup({ remove() { removed++; } });
-  return { api, timers, setMode: value => { mode = value; },
+  return { api, timers, timerCount: () => nextTimer, setMode: value => { mode = value; },
     counts: () => ({ calls, removed, aborted }),
     async advance(ms) {
       at += ms;
@@ -58,6 +67,25 @@ function harness() {
 }
 
 (async () => {
+  {
+    const h = harness();
+    const first = { id: 'welcome-1', type: 'welcome', uname: '第一位', receivedAt: 100000 };
+    h.api.fixed(first);
+    const created = h.timerCount();
+    const timerId = [...h.timers.keys()][0];
+    for (let i = 0; i < 100; i++) h.api.fixed({ ...first });
+    assert.equal(h.timerCount(), created, 'ordinary snapshots reuse the same deadline');
+    assert.equal(h.timers.size, 1); assert.equal(h.timers.has(timerId), true);
+    await h.advance(2000);
+    h.api.fixed({ ...first, id: 'welcome-2', uname: '第二位', receivedAt: 102000 });
+    assert.equal(h.timers.has(timerId), false); assert.equal(h.timers.size, 1);
+    await h.advance(1000); assert.equal(h.api.fixedVisible(), true, 'the old welcome deadline cannot hide its replacement');
+    await h.advance(2000); assert.equal(h.api.fixedVisible(), false); assert.equal(h.timers.size, 0);
+    h.api.fixed({ ...first, receivedAt: 105000 });
+    h.api.fixed({ ...first, receivedAt: 105000 }, { showWelcome: false });
+    assert.equal(h.timers.size, 0); assert.equal(h.api.fixedVisible(), false);
+    console.log('PASS unchanged welcomes reuse one timer; replacement, expiry and disabling cancel the correct deadline');
+  }
   {
     const h = harness(); h.setMode('fail');
     assert.equal(await h.api.lookup(7), ''); h.setMode('success');

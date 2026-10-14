@@ -56,6 +56,9 @@
   let canvasWidth = 515;
   let canvasHeight = 650;
   let renderedSceneRevision = -1;
+  let latestWelcome = null;
+  let welcomeTimer = null;
+  let welcomeDeadline = 0;
   let renderedSessionId = '';
   const retiredSessionIds = new Set();
   let outputEvents = null;
@@ -108,18 +111,9 @@
     cancelMessageMotion();
     const config = currentThemeConfig();
     skinFonts.sync(settings.theme, config.fontFamily);
-    // Width controls typography and wrapping. Height is the chat viewport and
-    // must only change how many rows fit; otherwise shortening the window also
-    // shrinks every row and preserves the empty space the user tried to remove.
-    // The desktop preview and OBS are the same canonical canvas. Window size
-    // changes are synchronized by the main process, so both outputs must use
-    // identical typography instead of independently responsive layouts.
-    const widthRatio = 1;
-    // Width primarily changes line wrapping.  Keep a small optical response so
-    // proportional resizing still feels alive, but never let a wide overlay
-    // turn 32px chat text into page-sized display type.
-    const responsive = Math.max(0.9, Math.min(1.12, Math.pow(widthRatio, 0.25)));
-    const scale = responsive * config.overallScale / 100;
+    // Typography uses the saved scale in every output. Canvas dimensions only
+    // affect line wrapping and the number of visible cards.
+    const scale = config.overallScale / 100;
     const root = document.documentElement.style;
     root.setProperty('--ui-scale', scale.toFixed(4));
     root.setProperty('--message-gap-base', config.messageGap + 'px');
@@ -133,6 +127,11 @@
     root.setProperty('--body-color', config.bodyColor);
     root.setProperty('--gift-color', config.giftColor);
     root.setProperty('--time-color', config.timeColor);
+    const medalColor = config.medalColor || '#eceff4';
+    root.setProperty('--medal-rgb', [1, 3, 5].map(index => parseInt(medalColor.slice(index, index + 2), 16)).join(', '));
+    root.setProperty('--thought-color', config.thoughtColor || '#f1a431');
+    root.setProperty('--gift-value-color', config.giftValueColor || '#a8a5a3');
+    root.setProperty('--gift-marker-color', config.giftMarkerColor || '#4fa8f5');
     if (settings.theme === 'portrait') {
       const width = Number(config.portraitWidth);
       root.setProperty('--portrait-width', Math.max(30, Math.min(70, Number.isFinite(width) ? width : 48)) + '%');
@@ -163,6 +162,8 @@
     document.body.style.setProperty('--captain', config.captainColor);
     document.body.classList.toggle('show-avatars', config.showAvatar !== false);
     document.body.classList.toggle('show-welcome', config.showWelcome !== false);
+    document.body.classList.toggle('welcome-single', config.welcomeMode === 'single');
+    syncFixedWelcome();
     updateEmptyState();
     if (config.showAvatar !== false) {
       els.messageStack.querySelectorAll('.message-avatar').forEach(loadAvatar);
@@ -824,10 +825,56 @@
   function updateEmptyState() {
     const hasMessages = !!(
       els.pinnedScStack.querySelector('.message-row') ||
-      els.messageList.querySelector(currentThemeConfig().showWelcome === false
+      els.fixedWelcome?.firstElementChild ||
+      els.messageList.querySelector(currentThemeConfig().showWelcome === false || currentThemeConfig().welcomeMode === 'single'
         ? '.message-row:not(.is-welcome)' : '.message-row')
     );
     els.emptyState.hidden = hasMessages;
+  }
+
+  function stopWelcomeTimer() {
+    if (welcomeTimer !== null) clearTimeout(welcomeTimer);
+    welcomeTimer = null;
+    welcomeDeadline = 0;
+  }
+
+  function syncFixedWelcome() {
+    const host = els.fixedWelcome;
+    if (!host) return;
+    const config = currentThemeConfig();
+    const deadline = latestWelcome && Number(latestWelcome.receivedAt) + config.welcomeDuration * 1000;
+    const remaining = deadline - Date.now();
+    const visible = !pageHidden && config.showWelcome !== false && config.welcomeMode === 'single' &&
+      latestWelcome?.type === 'welcome' && Number.isFinite(deadline) && remaining > 0;
+    document.body.classList.toggle('has-fixed-welcome', !!visible);
+    let changed = false;
+    if (!visible) {
+      stopWelcomeTimer();
+      if (host.firstElementChild) { host.replaceChildren(); changed = true; }
+    }
+    else {
+      const signature = JSON.stringify(latestWelcome);
+      if (host.firstElementChild?.dataset.welcomeSignature !== signature) {
+        const row = makeMessageRow(latestWelcome);
+        row.classList.remove('is-clipped');
+        row.dataset.welcomeSignature = signature;
+        host.replaceChildren(row);
+        changed = true;
+      }
+      // Ordinary chat snapshots must not recreate an unchanged welcome timer.
+      if (welcomeTimer === null || welcomeDeadline !== deadline) {
+        stopWelcomeTimer();
+        welcomeDeadline = deadline;
+        welcomeTimer = setTimeout(() => {
+          welcomeTimer = null;
+          welcomeDeadline = 0;
+          syncFixedWelcome();
+          updateEmptyState();
+          syncMessageFit();
+        }, remaining);
+      }
+    }
+    if (changed) syncMessageArt();
   }
 
   function resetSwipeRow(row) {
@@ -927,6 +974,9 @@
     if (reloadForAppVersion(scene.appVersion)) return;
     const revision = Number(scene.revision);
     if (Number.isFinite(revision) && revision <= renderedSceneRevision) return;
+    latestWelcome = scene.latestWelcome || null;
+    syncFixedWelcome();
+    updateEmptyState();
     const existing = new Map();
     els.messageStack.querySelectorAll('.message-row[data-scene-id]').forEach((row) => {
       existing.set(row.dataset.sceneId, row);
@@ -939,6 +989,7 @@
     const changed = incoming.length !== existing.size || incoming.some(({ id, signature }) => existing.get(id)?.dataset.sceneMessage !== signature);
     if (!changed) {
       if (Number.isFinite(revision)) renderedSceneRevision = revision;
+      syncMessageFit();
       return;
     }
     const keep = new Set(incoming.map(({ id }) => id));
@@ -1008,10 +1059,13 @@
     if (Number.isFinite(Number(revision)) && Number(revision) < renderedSceneRevision) return;
     cancelMessageMotion();
     lastMessageMotionAt = 0;
+    latestWelcome = null;
+    stopWelcomeTimer();
     stopMessageArt();
     els.messageStack.querySelectorAll('.message-row').forEach((row) => {
       row.remove();
     });
+    syncFixedWelcome();
     syncMessageFit();
     updateEmptyState();
     // IPC clear can beat an older SSE event already on its way to the preview.
@@ -1240,10 +1294,12 @@
     els.messageStack = document.getElementById('messageStack');
     els.pinnedScStack = document.getElementById('pinnedScStack');
     els.messageList = document.getElementById('messageList');
+    els.fixedWelcome = document.getElementById('fixedWelcome');
     els.emptyState = document.getElementById('emptyState');
     els.unlockToast = document.getElementById('unlockToast');
     window.addEventListener('pagehide', () => {
       pageHidden = true;
+      stopWelcomeTimer();
       stopAvatars();
       skinFonts.clear();
       stopMessageFit();

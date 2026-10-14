@@ -41,6 +41,8 @@ if (!process.versions.electron) {
     return window.webContents.executeJavaScript(`(()=>{
       const rect=${rect}; const list=document.getElementById('messageList');
       return {viewport:rect(list.getBoundingClientRect()),
+        fixed:Array.from(document.querySelectorAll('.fixed-welcome > .message-row'),r=>({text:r.textContent,...rect(r.getBoundingClientRect()),
+          nowrap:getComputedStyle(r.querySelector('.welcome-body')).whiteSpace})),
         rows:Array.from(list.children,r=>({id:r.dataset.sceneId,clipped:r.classList.contains('is-clipped'),...rect(r.getBoundingClientRect())})),
         pinned:Array.from(document.querySelectorAll('.pinned-sc-stack > .message-row'),r=>rect(r.getBoundingClientRect()))};
     })()`);
@@ -79,9 +81,9 @@ if (!process.versions.electron) {
       }
       let revision = 0;
       const chat = count => Array.from({ length: count }, (_, i) => ({ id: 'chat-' + i, type: i % 4 === 0 ? 'welcome' : 'danmaku', uname: '测试观众', role: 'viewer', text: i % 3 ? '测试弹幕 ' + i : '这是一条用于验证多行高度的测试消息。'.repeat(4), time: '12:00:00' }));
-      async function show(theme, alignment, messages, overrides = {}) {
+      async function show(theme, alignment, messages, overrides = {}, latestWelcome = null) {
         const settings = themes.migrateSettings({ theme, themeConfigs: { [theme]: { ...themes.defaults[theme], showAvatar: false, showWelcome: true, surfaceOpacity: 0, messageAlign: alignment, ...overrides } } });
-        const state = { ...empty, settings, scene: { sessionId: 'alignment-test', revision: ++revision, messages } };
+        const state = { ...empty, settings, scene: { sessionId: 'alignment-test', revision: ++revision, messages, latestWelcome } };
         for (const window of windows) {
           await window.webContents.executeJavaScript(`window.alignmentAudit.applyOutputState(${JSON.stringify(state)})`);
           await settle(window);
@@ -112,6 +114,58 @@ if (!process.versions.electron) {
           await settle(window); atEdge(await measure(window), 'top');
         }
         console.log('PASS ' + theme + ': sparse/overflow, same recent cards, SC, welcome, partial cards, append and desktop/browser parity');
+        const welcome = { id: 'fixed', type: 'welcome', uname: '很长的进房昵称'.repeat(20), receivedAt: Date.now() };
+        const fixed = await show(theme, 'top', messages, { welcomeMode: 'single', welcomeDuration: 30 }, welcome);
+        assert.equal(fixed.fixed.length, 1); assert.equal(fixed.fixed[0].nowrap, 'nowrap');
+        assert(fixed.fixed[0].top >= fixed.viewport.bottom, 'fixed welcome reserves its own footer');
+        assert.equal(fixed.rows.filter(r=>r.id==='chat-0')[0].height, 0, 'scroll welcomes hidden in single mode');
+        atEdge(fixed, 'top');
+        const hidden = await show(theme, 'top', messages, { welcomeMode: 'single', showWelcome: false }, welcome);
+        assert.equal(hidden.fixed.length, 0);
+        const scroll = await show(theme, 'bottom', messages, { welcomeMode: 'scroll' }, welcome);
+        assert.equal(scroll.fixed.length, 0); assert(scroll.rows.some(r=>r.id==='chat-0' && r.height>0));
+        const expired = await show(theme, 'top', messages, { welcomeMode: 'single', welcomeDuration: 1 }, { ...welcome, receivedAt: Date.now()-2000 });
+        assert.equal(expired.fixed.length, 0, 'reopening must not restart an expired welcome');
+        console.log('PASS ' + theme + ': fixed one-line welcome, mode toggle, hidden and expired welcome');
+      }
+      const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+      await show('portrait', 'bottom', chat(10), { welcomeMode: 'single', welcomeDuration: 1 }, { id: 'first', type: 'welcome', uname: '第一位', receivedAt: Date.now() });
+      await sleep(650);
+      await show('portrait', 'bottom', chat(10), { welcomeMode: 'single', welcomeDuration: 1 }, { id: 'second', type: 'welcome', uname: '第二位', receivedAt: Date.now() });
+      await sleep(450);
+      for (const window of windows) assert.match((await measure(window)).fixed[0].text, /第二位/);
+      await sleep(650);
+      for (const window of windows) { await settle(window); assert.equal((await measure(window)).fixed.length, 0); }
+      console.log('PASS fixed welcome replacement restarts its timer and both outputs hide automatically');
+      // Verify computed colors, including the pseudo-element used for the
+      // amount marker, instead of only checking that settings were persisted.
+      const colorMessage = [{ id: 'colors', type: 'gift', kind: 'gift', uname: '测试昵称', role: 'host', medal: '陪伴 12', text: '测试礼物', valueYuan: 30, gapMs: 451, time: '12:00:00' }];
+      const readColors = window => window.webContents.executeJavaScript(`(()=>{
+        const read=(selector,pseudo)=>getComputedStyle(document.querySelector(selector),pseudo).color;
+        return {medal:read('.medal-label'),thought:read('.message-gap'),value:read('.gift-value'),marker:read('.gift-value','::first-letter'),body:read('.message-body')};
+      })()`);
+      for (const theme of ['glass', 'tui']) {
+        await show(theme, 'bottom', colorMessage);
+        const baseline = await readColors(windows[1]);
+        assert.equal(baseline.medal, 'rgba(236, 239, 244, 0.56)');
+        if (theme === 'tui') {
+          assert.equal(baseline.thought, 'rgb(241, 164, 49)');
+          assert.equal(baseline.value, 'rgb(168, 165, 163)');
+          assert.equal(baseline.marker, 'rgb(79, 168, 245)');
+        }
+        await show(theme, 'bottom', colorMessage, { medalColor: '#123456', thoughtColor: '#234567', giftValueColor: '#345678', giftMarkerColor: '#456789' });
+        const desktop = await readColors(windows[0]), browser = await readColors(windows[1]);
+        assert.deepEqual(desktop, browser);
+        assert.equal(browser.medal, 'rgba(18, 52, 86, 0.56)');
+        assert.equal(browser.body, baseline.body, 'changing amount colors does not change gift text');
+        if (theme === 'tui') {
+          assert.equal(browser.thought, 'rgb(35, 69, 103)');
+          assert.equal(browser.value, 'rgb(52, 86, 120)');
+          assert.equal(browser.marker, 'rgb(69, 103, 137)');
+        }
+        await show(theme, 'bottom', colorMessage);
+        assert.deepEqual(await readColors(windows[1]), baseline, 'reset restores the original palette');
+        console.log('PASS ' + theme + ': independent text colors and original defaults match across both outputs');
       }
       // A scaled browser source must retain the same logical top alignment.
       windows[1].setSize(330, 500);

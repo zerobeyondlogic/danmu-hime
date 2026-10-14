@@ -57,7 +57,6 @@ let desktopRoomGeneration = 0;
 let appState = {};
 let stateFile = '';
 let saveTimer = null;
-let previewViewport = null;
 let previewViewportRevision = 0;
 let previewViewportWaiters = [];
 let applyingPreviewSize = false;
@@ -69,6 +68,7 @@ let overlaySnapState = { horizontal: null, vertical: null };
 let overlayBoundsRecoveryTimer = null;
 let overlayNativeMoveActive = false;
 let sceneRevision = 0;
+let latestWelcome = null;
 let nextSceneMessageId = 1;
 let previewResizeRequest = 0;
 let stylePresetApplyTask = null;
@@ -161,6 +161,7 @@ function sceneSnapshot() {
     sessionId: OUTPUT_SESSION_ID,
     appVersion: app.getVersion(),
     revision: sceneRevision,
+    latestWelcome: latestWelcome ? { ...latestWelcome, emotes: { ...latestWelcome.emotes } } : null,
     playback: messagePlayback.getStats(),
     messages: messagePlayback.getMessages().map((message) => Object.assign({}, message, {
       emotes: Object.assign({}, message.emotes)
@@ -179,6 +180,19 @@ function addSceneMessage(value) {
   const message = sanitizeSceneMessage(value);
   if (!message) return null;
   message.id = String(nextSceneMessageId++);
+  if (message.type === 'welcome') {
+    // Fixed welcomes have one bounded slot and never displace chat or consume
+    // its playback queue. Local receipt time keeps all outputs on one deadline.
+    latestWelcome = { ...message, receivedAt: Date.now() };
+    const current = appState.settings || {};
+    const theme = themes.resolveTheme(current.theme);
+    const config = current.themeConfigs && current.themeConfigs[theme] || themes.defaults[theme];
+    if (config.welcomeMode === 'single') {
+      sceneRevision += 1;
+      flushScene();
+      return { ...message, emotes: { ...message.emotes } };
+    }
+  }
   // Start SC lifetime at local receipt, before publishing any renderer data.
   // message.at may originate from a replay/source and does not control expiry.
   if (message.type === 'sc') {
@@ -263,6 +277,7 @@ function removeUpstreamSc(ids) {
 }
 
 function clearScene(reason = 'manual-clear') {
+  latestWelcome = null;
   recordScDiagnostic({ stage: 'clear', reason });
   if (scAlerts) scAlerts.clear();
   scExpiry.clear();
@@ -471,24 +486,16 @@ function outputState() {
 }
 
 function getPreviewSize() {
-  const saved = appState.requestedPreviewSize || appState.previewSize || appState.overlayBounds || {};
-  return {
-    width: Math.max(MIN_OVERLAY_BOUNDS.width, Math.min(3840, Math.round(Number(saved.width) || OVERLAY_BOUNDS.width))),
-    height: Math.max(MIN_OVERLAY_BOUNDS.height, Math.min(2160, Math.round(Number(saved.height) || OVERLAY_BOUNDS.height)))
-  };
+  return normalizePreviewViewport(appState.requestedPreviewSize || appState.previewSize || appState.overlayBounds);
 }
 
 function withPreviewCanvas(settings, roomId) {
-  const preview = getRequestedPreviewSize();
+  const preview = getPreviewSize();
   return Object.assign({}, settings || {}, {
     roomId: roomId === undefined ? String(settings && settings.roomId || '') : String(roomId || ''),
     previewCanvasWidth: preview.width,
     previewCanvasHeight: preview.height
   });
-}
-
-function getRequestedPreviewSize() {
-  return normalizePreviewViewport(appState.requestedPreviewSize || appState.previewSize || appState.overlayBounds);
 }
 
 function normalizePreviewViewport(value) {
@@ -500,7 +507,6 @@ function normalizePreviewViewport(value) {
 
 function acceptPreviewViewport(value) {
   const next = normalizePreviewViewport(value);
-  previewViewport = next;
   appState.previewSize = next;
   if (manualPreviewResizePending && !applyingPreviewSize && Date.now() >= suppressRequestedViewportUntil) {
     appState.requestedPreviewSize = Object.assign({}, next);
@@ -650,7 +656,6 @@ function clearPreviewRuntime() {
   const waiters = previewViewportWaiters;
   previewViewportWaiters = [];
   waiters.forEach((finish) => finish(null));
-  previewViewport = null;
   previewViewportRevision += 1;
   applyingPreviewSize = false;
   manualPreviewResizePending = false;
@@ -809,7 +814,7 @@ function secureWindow(window, port) {
 function createOverlayWindow(port) {
   if (app.isQuitting || (appState.settings || {}).previewEnabled === false) return null;
   if (overlayWindow && !overlayWindow.isDestroyed()) return overlayWindow;
-  const requested = getRequestedPreviewSize();
+  const requested = getPreviewSize();
   const bounds = recoverWindowBounds(Object.assign(
     {}, clampBounds(appState.overlayBounds, OVERLAY_BOUNDS, MIN_OVERLAY_BOUNDS.width, MIN_OVERLAY_BOUNDS.height), requested
   ), screen.getAllDisplays().map((display) => display.workArea));
@@ -881,7 +886,7 @@ function createOverlayWindow(port) {
     setClickThrough(clickThrough);
     // A disabled preview may have had its canonical dimensions changed while
     // this page was loading. Always use the latest saved size.
-    const target = getRequestedPreviewSize();
+    const target = getPreviewSize();
     setOverlayContentSize(target.width, target.height).catch((error) => console.warn('[desktop] 更新预览尺寸失败:', error.message));
     if (overlayHasConnected || messagePlayback.hasMessages()) window.showInactive();
   });
@@ -1187,8 +1192,7 @@ function createControlWindow(port) {
 }
 
 async function setOverlayContentSize(width, height) {
-  const targetWidth = Math.max(MIN_OVERLAY_BOUNDS.width, Math.min(3840, Math.round(Number(width) || OVERLAY_BOUNDS.width)));
-  const targetHeight = Math.max(MIN_OVERLAY_BOUNDS.height, Math.min(2160, Math.round(Number(height) || OVERLAY_BOUNDS.height)));
+  const { width: targetWidth, height: targetHeight } = normalizePreviewViewport({ width, height });
   const request = ++previewResizeRequest;
   const window = overlayWindow;
   const isCurrent = () => request === previewResizeRequest && window === overlayWindow && window && !window.isDestroyed();

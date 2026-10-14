@@ -1,6 +1,6 @@
 {
   "name": "danmu-hime",
-  "version": "0.8.19",
+  "version": "0.8.22",
   "private": true,
   "description": "A transparent Bilibili live chat overlay for streamers",
   "license": "UNLICENSED",

@@ -51,6 +51,7 @@ function harness() {
   };
   const instrumented = renderer.slice(0, renderer.lastIndexOf('\n  bindProgramSettings();')) + `
     window.__audit = { init, startQrLogin, closeQrDialog, stopQrPoll, initLoginStatus, renderLoginStatus, openThemeEditor, closeThemeEditor,
+      bindNativeDialogs() { bindControlCloseDialog(); bindProgramSettings(); bindStylePresetDialog(); },
       seed(){settings=themeRegistry.migrateSettings({theme:'glass',previewEnabled:true});
         for(const id of ['qrDialog','qrCloseButton','qrImage','qrTip','loginStatus','loginDetail','loginButton','logoutButton'])els[id]=byId(id);},
       settings:()=>settings, login:()=>loginUid };
@@ -92,6 +93,68 @@ test('a deleted saved preset does not select another entry or claim it was resto
   await h.ready(); await tick();
   assert.equal(h.element('stylePresetSelect').value, '');
   assert.doesNotMatch(h.element('stylePresetHint').textContent, /已恢复/);
+});
+
+test('welcome mode exposes a per-skin timeout only for single mode and remembers it', async () => {
+  const h = harness(); await h.ready(); h.api.openThemeEditor('portrait');
+  assert.equal(h.element('welcomeModeInput').value, 'scroll');
+  assert.equal(h.element('welcomeDurationField').classList.contains('hidden'), true);
+  h.element('welcomeModeInput').value = 'single'; h.element('welcomeModeInput').handlers.get('change')();
+  assert.equal(h.element('welcomeDurationField').classList.contains('hidden'), false);
+  h.element('welcomeDurationInput').value = '7'; h.element('welcomeDurationInput').handlers.get('input')();
+  assert.equal(h.api.settings().themeConfigs.portrait.welcomeDuration, 7);
+  assert.equal(h.api.settings().themeConfigs.glass.welcomeMode, 'scroll');
+  h.api.openThemeEditor('glass'); assert.equal(h.element('welcomeModeInput').value, 'scroll');
+  h.api.openThemeEditor('portrait'); assert.equal(h.element('welcomeModeInput').value, 'single');
+  assert.equal(h.element('welcomeDurationInput').value, '7');
+  h.element('themeWelcomeInput').checked = false; h.element('themeWelcomeInput').handlers.get('change')();
+  assert.equal(h.element('welcomeDurationInput').disabled, true);
+});
+
+test('extra color controls appear only on supported skins and save independently with reset', async () => {
+  const h = harness(); await h.ready();
+  const keys = ['medalColor', 'thoughtColor', 'giftValueColor', 'giftMarkerColor'];
+  for (const theme of themes.ids) {
+    h.api.openThemeEditor(theme);
+    for (const key of keys) {
+      const available = theme === 'tui' || (theme === 'glass' && key === 'medalColor');
+      assert.equal(h.element(key + 'Field').classList.contains('hidden'), !available);
+      assert.equal(h.element(key + 'Input').disabled, !available);
+    }
+  }
+  h.api.openThemeEditor('tui');
+  const before = plain(h.api.settings().themeConfigs.tui);
+  const colors = ['#123456', '#234567', '#345678', '#456789'];
+  for (let i = 0; i < keys.length; i++) {
+    h.element(keys[i] + 'Input').value = colors[i]; h.element(keys[i] + 'Input').handlers.get('input')();
+    assert.equal(h.api.settings().themeConfigs.tui[keys[i]], colors[i]);
+  }
+  assert.equal(h.api.settings().themeConfigs.tui.giftColor, before.giftColor);
+  assert.equal(h.api.settings().themeConfigs.glass.medalColor, themes.defaults.glass.medalColor);
+  for (const [id, timer] of [...h.timers]) if (!timer.repeat) { h.timers.delete(id); await timer.callback(); }
+  await tick();
+  for (let i = 0; i < keys.length; i++) assert.equal(h.saved.at(-1).themeConfigs.tui[keys[i]], colors[i]);
+  h.api.openThemeEditor('glass'); h.api.openThemeEditor('tui');
+  for (let i = 0; i < keys.length; i++) assert.equal(h.element(keys[i] + 'Input').value, colors[i]);
+  h.element('resetThemeButton').handlers.get('click')();
+  for (const key of keys) assert.equal(h.element(key + 'Input').value, themes.defaults.tui[key]);
+});
+
+test('native dialogs share focus wrapping and skip disabled, hidden and non-tab controls', async () => {
+  const h = harness(); await h.ready(); h.api.bindNativeDialogs();
+  for (const id of ['controlCloseDialog', 'programSettingsDialog', 'stylePresetDialog']) {
+    const dialog = h.element(id), first = h.element(id + '-first'), last = h.element(id + '-last');
+    const skipped = h.element(id + '-skipped'); skipped.tabIndex = -1;
+    const disabled = h.element(id + '-disabled'); disabled.disabled = true;
+    const hidden = h.element(id + '-hidden'); hidden.getClientRects = () => [];
+    dialog.querySelectorAll = () => [skipped, first, disabled, hidden, last];
+    let prevented = 0;
+    const event = { key: 'Tab', target: last, shiftKey: false, preventDefault() { prevented++; }, stopPropagation() {} };
+    last.focus(); dialog.handlers.get('keydown')(event); assert.equal(h.document.activeElement, first);
+    event.shiftKey = true; dialog.handlers.get('keydown')(event); assert.equal(h.document.activeElement, last);
+    assert.equal(prevented, 2);
+    dialog.querySelectorAll = () => []; assert.doesNotThrow(() => dialog.handlers.get('keydown')(event));
+  }
 });
 
 test('the skin editor saves alignment for the edited skin and restores it when reopened', async () => {

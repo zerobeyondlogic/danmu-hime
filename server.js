@@ -7,6 +7,7 @@ const crypto = require('crypto');
 const { createRelay } = require('./relay.js');
 const { createGiftImageLookup } = require('./desktop/gift-images.js');
 const { createMediaCache } = require('./desktop/media-cache.js');
+const { safeEmoteUrl: safeBilibiliImageUrl } = require('./js/emotes.js');
 
 const ROOT = __dirname;
 const APP_VERSION = String(require('./package.json').version || '');
@@ -274,19 +275,6 @@ async function proxyRoomInfo(roomId) {
     return { ok: false, error: j.message || ('code ' + j.code) };
   }
   return { ok: true, roomId: j.data.room_id, ownerUid: j.data.uid };
-}
-
-function safeBilibiliImageUrl(rawUrl) {
-  if (typeof rawUrl !== 'string' || !rawUrl || rawUrl.length > 2048) return '';
-  try {
-    const normalized = String(rawUrl).replace(/^http:\/\//i, 'https://').replace(/^\/\//, 'https://');
-    const url = new URL(normalized);
-    const host = url.hostname.toLowerCase();
-    if (url.protocol !== 'https:' || url.username || url.password || (!host.endsWith('.hdslb.com') && !host.endsWith('.bilibili.com'))) return '';
-    return url.href;
-  } catch (e) {
-    return '';
-  }
 }
 
 async function proxyEmoteImage(res, rawUrl) {

@@ -302,10 +302,18 @@
       </label>
       <div class="theme-welcome-settings">
         <label class="theme-avatar-toggle">
-          <span><b>进房欢迎</b><small>作为消息显示，随新弹幕向上滚动</small></span>
+          <span><b>进房欢迎</b><small>每套皮肤独立保存显示方式与样式</small></span>
           <input id="themeWelcomeInput" type="checkbox" checked>
         </label>
+        <label class="theme-avatar-toggle theme-alignment-field">
+          <span><b>欢迎显示</b><small>单行固定在底部；滚动随弹幕排列</small></span>
+          <select id="welcomeModeInput">
+            <option value="scroll">随弹幕滚动</option>
+            <option value="single">底部单行</option>
+          </select>
+        </label>
         <div class="theme-control-list">
+          <label id="welcomeDurationField" class="hidden"><span>显示时长 <output id="welcomeDurationValue">3 秒</output></span><small>到时自动隐藏，新欢迎到来重新计时</small><input id="welcomeDurationInput" type="range" min="1" max="30" step="1" value="3"></label>
           <label class="welcome-font-control"><span>欢迎字号 <output id="welcomeFontValue">18px</output></span><input id="welcomeFontInput" type="range" min="12" max="48" step="1" value="18"></label>
         </div>
         <div class="theme-color-line theme-welcome-colors">
@@ -317,6 +325,10 @@
         <label><span>正文颜色</span><input id="bodyColorInput" type="color"></label>
         <label><span>礼物颜色</span><input id="giftColorInput" type="color"></label>
         <label><span>时间颜色</span><input id="timeColorInput" type="color"></label>
+        <label id="medalColorField" class="hidden"><span>勋章文字</span><input id="medalColorInput" type="color"></label>
+        <label id="thoughtColorField" class="hidden"><span>间隔提示</span><input id="thoughtColorInput" type="color"></label>
+        <label id="giftValueColorField" class="hidden"><span>金额文字</span><input id="giftValueColorInput" type="color"></label>
+        <label id="giftMarkerColorField" class="hidden"><span>金额图标</span><input id="giftMarkerColorInput" type="color"></label>
         <label><span>普通用户</span><input id="viewerColorInput" type="color"></label>
         <label><span>主播</span><input id="hostColorInput" type="color"></label>
         <label><span>房管</span><input id="managerColorInput" type="color"></label>

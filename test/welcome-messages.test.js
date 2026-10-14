@@ -57,6 +57,24 @@ let passed = 0;
 function ok(name) { console.log('PASS ' + name); passed++; }
 
 (async () => {
+  const fixed = harness();
+  fixed.api.settings({ theme: 'glass', themeConfigs: { glass: { welcomeMode: 'single', welcomeDuration: 3 } } });
+  const chat = fixed.api.add({ type: 'chat', text: '保留普通弹幕' });
+  for (let uid = 1; uid <= 100; uid++) fixed.api.entry({ uid, uname: '单行观众' + uid, at: 1 });
+  assert.deepEqual(plain(fixed.api.snapshot().messages).map(message => message.id), [chat.id]);
+  assert.equal(fixed.api.stats().pending, 0);
+  assert.equal(fixed.api.snapshot().latestWelcome.uid, 100);
+  assert.equal(fixed.api.snapshot().latestWelcome.receivedAt, fixed.now(), 'expiry uses local receipt, not upstream time');
+  const copied = fixed.api.snapshot(); copied.latestWelcome.uname = '不能修改源消息';
+  assert.equal(fixed.api.snapshot().latestWelcome.uname, '单行观众100');
+  fixed.api.clear();
+  assert.equal(fixed.published.at(-1).state.latestWelcome, null);
+  fixed.api.settings({ theme: 'glass', themeConfigs: { glass: { welcomeMode: 'scroll' } } });
+  fixed.api.entry({ uid: 101, uname: '滚动观众' });
+  assert.equal(fixed.api.snapshot().messages[0].uid, 101);
+  assert.equal(fixed.api.snapshot().latestWelcome.uid, 101);
+  ok('single welcomes replace one timed slot without queueing or evicting chat, clear removes it, and scroll mode resumes normally');
+
   const h = harness();
   const receipt = h.api.entry({ uid: 7, uname: '欢迎观众', avatarUrl: 'https://i0.hdslb.com/arrival.png', at: h.now() });
   assert.equal(receipt.type, 'welcome');

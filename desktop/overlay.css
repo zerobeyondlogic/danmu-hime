@@ -319,6 +319,9 @@ body.show-avatars .message-avatar { display: grid; }
 .role-label::after { content: "]"; }
 
 .gift-value { color: var(--gift-color); }
+body:is([data-theme="glass"], [data-theme="tui"]) .medal-label {
+  color: rgba(var(--medal-rgb, 236, 239, 244), 0.56);
+}
 
 .message-body {
   color: var(--body-color);
@@ -566,7 +569,7 @@ body[data-theme="tui"] .message-row.is-sc {
 body[data-theme="tui"] .message-gap {
   display: block;
   margin-bottom: calc(10px * var(--ui-scale));
-  color: #f1a431;
+  color: var(--thought-color, #f1a431);
   font-size: calc(var(--meta-font-base) * var(--ui-scale));
   font-weight: 600;
   line-height: 1;
@@ -581,8 +584,8 @@ body[data-theme="tui"] .gift-value,
 body[data-theme="tui"] .message-body,
 body[data-theme="tui"] .message-time { font-family: var(--theme-font-family), var(--mono); }
 
-body[data-theme="tui"] .gift-value { color: #a8a5a3; }
-body[data-theme="tui"] .gift-value::first-letter { color: #4fa8f5; }
+body[data-theme="tui"] .gift-value { color: var(--gift-value-color, #a8a5a3); }
+body[data-theme="tui"] .gift-value::first-letter { color: var(--gift-marker-color, #4fa8f5); }
 
 body[data-theme="tui"] .message-row.is-gift .message-body,
 body[data-theme="tui"] .message-row.is-sc .message-body { color: var(--gift-color); }
@@ -668,7 +671,6 @@ body[data-theme] .message-row.is-welcome {
 }
 body[data-theme] .message-row.is-welcome::before,
 body[data-theme] .message-row.is-welcome::after { content: none; }
-body:not(.show-welcome) .message-row.is-welcome { display: none; }
 .welcome-body {
   color: var(--welcome-text-color, var(--time-color));
   font-size: calc(var(--welcome-font-base) * var(--ui-scale));
@@ -782,9 +784,6 @@ body[data-theme="portrait"] .message-row.is-gift .message-art-focus {
   width: 58%;
   padding: calc(6px * var(--ui-scale));
   object-fit: contain;
-  object-position: center;
-  -webkit-mask-image: linear-gradient(90deg, transparent 0%, rgba(0, 0, 0, 0.5) 25%, #000 57%);
-  mask-image: linear-gradient(90deg, transparent 0%, rgba(0, 0, 0, 0.5) 25%, #000 57%);
 }
 body[data-theme="portrait"] .message-row.is-welcome {
   min-height: calc(52px * var(--ui-scale));
@@ -1171,6 +1170,20 @@ body[data-theme="win95"] .welcome-body::before {
 
 /* Hidden welcome rows must remain hidden after the illustrated grid rules. */
 body:not(.show-welcome) .message-row.is-welcome { display: none; }
+
+/* A fixed welcome participates in the column, so it never covers chat or SC. */
+.fixed-welcome { flex: 0 0 auto; min-width: 0; overflow: hidden; -webkit-app-region: drag; }
+.fixed-welcome:empty { display: none; }
+body.has-fixed-welcome .pinned-sc-stack { flex-shrink: 1; }
+body[data-theme].welcome-single .message-list > .message-row.is-welcome { display: none; }
+body[data-theme] .fixed-welcome .welcome-body {
+  display: block;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  overflow-wrap: normal;
+}
 
 @media (prefers-reduced-motion: reduce) {
   .message-row,

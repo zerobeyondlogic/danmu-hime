@@ -279,6 +279,30 @@ test('old presets default to timed SC expiry and do not revive the legacy global
   }
 });
 
+test('fixed welcome mode and timeout survive preset save, reload and apply per skin', () => {
+  for (const theme of themes.ids) {
+    const saved = presets.saveStylePreset([], fixture({ theme, config: { ...themes.defaults[theme], welcomeMode: 'single', welcomeDuration: 9 } }), () => 'welcome').preset;
+    const [restored] = presets.normalizeStylePresets(plain([saved]));
+    const applied = presets.settingsForStylePreset({}, restored);
+    assert.strictEqual(applied.themeConfigs[theme].welcomeMode, 'single');
+    assert.strictEqual(applied.themeConfigs[theme].welcomeDuration, 9);
+    for (const other of themes.ids.filter(id => id !== theme)) assert.strictEqual(applied.themeConfigs[other].welcomeMode, 'scroll');
+  }
+});
+
+test('independent medal and TUI colors survive preset save, reload and apply', () => {
+  for (const theme of ['glass', 'tui']) {
+    const extra = theme === 'tui' ? { medalColor: '#123456', thoughtColor: '#234567', giftValueColor: '#345678', giftMarkerColor: '#456789' } : { medalColor: '#123456' };
+    const input = fixture({ theme, config: { ...themes.defaults[theme], ...extra } });
+    const saved = presets.saveStylePreset([], input, () => 'extra-colors').preset;
+    const [restored] = presets.normalizeStylePresets(plain([saved]));
+    const original = themes.migrateSettings({});
+    const applied = presets.settingsForStylePreset(original, restored);
+    for (const [key, value] of Object.entries(extra)) assert.strictEqual(applied.themeConfigs[theme][key], value);
+    for (const other of themes.ids.filter(id => id !== theme)) assert.deepStrictEqual(applied.themeConfigs[other], original.themeConfigs[other]);
+  }
+});
+
 test('alignment survives preset save and reload without changing other skins', () => {
   for (const theme of themes.ids) {
     const previous = { ...themes.defaults[theme] }; delete previous.messageAlign;
